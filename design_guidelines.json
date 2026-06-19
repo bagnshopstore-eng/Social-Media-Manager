@@ -1,0 +1,93 @@
+{
+  "theme": "Light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "vibe": "Objective, rigid, functional. 'Linear/Notion style', modern editorial.",
+  "colors": {
+    "background": "#FFFFFF",
+    "surface": "#F4F4F5",
+    "surface_hover": "#E4E4E7",
+    "border": "#E4E4E7",
+    "border_strong": "#18181B",
+    "text_primary": "#09090B",
+    "text_secondary": "#71717A",
+    "primary": "#000000",
+    "primary_foreground": "#FFFFFF",
+    "status_draft": "#A1A1AA",
+    "status_pending_approval": "#F59E0B",
+    "status_approved": "#10B981",
+    "status_rejected": "#EF4444",
+    "status_needs_edit": "#3B82F6",
+    "status_published": "#09090B",
+    "status_expired": "#D4D4D8",
+    "platform_ig": "#C2185B",
+    "platform_ig_bg": "#FCE4EC",
+    "platform_fb": "#1877F2",
+    "platform_fb_bg": "#E3F2FD",
+    "platform_li": "#0A66C2",
+    "platform_li_bg": "#E3F2FD"
+  },
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "Manrope",
+    "rules": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-semibold",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "overline": "text-xs tracking-[0.2em] uppercase font-bold text-gray-500"
+    }
+  },
+  "layout_and_spacing": {
+    "philosophy": "Generous Spacing Philosophy, Control Room Grid",
+    "spacing_scale": "p-1, p-2, p-4, p-6, p-8, p-12",
+    "bento_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 or gap-6 for tight control room feel. Cards use h-full.",
+    "alignment": "Mobile-first, left-aligned dense content."
+  },
+  "component_rules": {
+    "cards": "Flat background, 1px subtle border, rounded-lg. Hover: slightly darkens border, subtle lift.",
+    "buttons": "Shadcn defaults but squared off to rounded-md. Primary button black, secondary outline.",
+    "nav": "Top nav with crystal glassmorphism or solid white with 1px bottom border. z-50 fixed. Mobile hamburger menu.",
+    "icons_library": "lucide-react"
+  },
+  "media_assets": {
+    "admin_profile": {
+      "url": "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODh8MHwxfHNlYXJjaHwyfHxhZG1pbiUyMHByb2ZpbGUlMjBwb3J0cmFpdHxlbnwwfHx8fDE3ODE3OTEzMTR8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Admin profile picture"
+    },
+    "products": [
+      {
+        "url": "https://images.unsplash.com/photo-1660002561318-6ef0a0ae1f04?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzN8MHwxfHNlYXJjaHwxfHxraXRjaGVuJTIwZ2FkZ2V0fGVufDB8fHx8MTc4MTc5MTI5NHww&ixlib=rb-4.1.0&q=85",
+        "category": "kitchen_gadget"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1720424643395-f966961d7782?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODh8MHwxfHNlYXJjaHwyfHx3ZWxsbmVzcyUyMGRldmljZXxlbnwwfHx8fDE3ODE3OTEyOTR8MA&ixlib=rb-4.1.0&q=85",
+        "category": "wellness_device"
+      },
+      {
+        "url": "https://images.pexels.com/photos/22307556/pexels-photo-22307556.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "smart_home_tech"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1519558260268-cde7e03a0152?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwyfHxzbWFydCUyMGhvbWUlMjB0ZWNofGVufDB8fHx8MTc4MTc5MTI5NHww&ixlib=rb-4.1.0&q=85",
+        "category": "smart_home_tech"
+      }
+    ]
+  },
+  "animations": {
+    "hover": "Subtle transition-all duration-200 ease-in-out",
+    "active": "Scale-95 on click"
+  },
+  "accessibility": {
+    "contrast": "Ensure 4.5:1 ratio minimum for text",
+    "testing": "All interactive elements must include data-testid attributes"
+  },
+  "instructions_to_main_agent": [
+    "Use raw HTML/Tailwind and Shadcn for layout.",
+    "Implement Mobile-First bento-style cards for the dashboard.",
+    "Add 'data-testid' to all buttons and actionable items.",
+    "For icons, use lucide-react.",
+    "Ensure the fonts Outfit and Manrope are imported in the index.html or layout wrapper.",
+    "Do not use generic gray backgrounds for the whole app. Use pure white for the app background and #F4F4F5 for card backgrounds."
+  ]
+}
