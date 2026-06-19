@@ -365,15 +365,17 @@ async def postproxy_diagnose(email: str = Depends(require_admin)):
                 "key_present": False, "key_length": 0}
     # try X-API-Key first, fallback to Bearer
     headers_variants = [
-        {"X-API-Key": key},
-        {"Authorization": f"Bearer {key}"},
+        ("X-API-Key", {"X-API-Key": key}),
+        ("Authorization: Bearer", {"Authorization": f"Bearer {key}"}),
     ]
     last = None
+    used_auth = "X-API-Key"
     try:
         async with httpx.AsyncClient(timeout=15) as cli:
-            for h in headers_variants:
+            for label, h in headers_variants:
                 r = await cli.get(url, headers=h)
                 last = r
+                used_auth = label
                 if r.status_code != 401:
                     break
         r = last
@@ -385,8 +387,7 @@ async def postproxy_diagnose(email: str = Depends(require_admin)):
             "success": 200 <= r.status_code < 300,
             "status_code": r.status_code,
             "url": url,
-            "auth_header": list((headers_variants[0] if r is headers_variants else headers_variants[-1]).keys())[0]
-                if hasattr(headers_variants, "keys") else "X-API-Key or Authorization",
+            "auth_header": used_auth,
             "profile_group_id": pg,
             "key_length": len(key),
             "key_preview": f"{key[:6]}...{key[-4:]}",
