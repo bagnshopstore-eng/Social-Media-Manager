@@ -170,11 +170,15 @@ async def postproxy_analytics(published_id: str) -> dict:
 
 
 def assetify(url: str) -> str:
+    """Convert a relative /uploads/... or /api/uploads/... path into the public absolute URL
+    that external services (Postproxy) and previewers can reach. The Kubernetes ingress only
+    routes /api/* to the backend so legacy /uploads/... paths are rewritten to /api/uploads/..."""
     if not url:
         return url
     if url.startswith("http"):
         return url
-    # public URL = REACT_APP_BACKEND_URL value baked into FE; for now use os env
+    if url.startswith("/uploads/"):
+        url = "/api" + url
     base = os.environ.get("PUBLIC_BACKEND_URL", "").rstrip("/")
     return f"{base}{url}" if base else url
 
@@ -260,7 +264,7 @@ async def generate_image(prompt: str, filename_prefix: str = "img") -> Optional[
         image_bytes = base64.b64decode(img["data"])
         fname = f"{filename_prefix}_{new_id()[:8]}.png"
         (UPLOADS_DIR / fname).write_bytes(image_bytes)
-        return f"/uploads/{fname}"
+        return f"/api/uploads/{fname}"
     except Exception as e:
         logger.warning("Gemini image gen failed: %s", e)
         return None

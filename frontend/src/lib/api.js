@@ -27,5 +27,8 @@ api.interceptors.response.use(
 export const assetUrl = (p) => {
   if (!p) return null;
   if (p.startsWith("http")) return p;
-  return `${BACKEND_URL}${p}`;
+  // Legacy posts stored "/uploads/..." but the Kubernetes ingress only routes "/api/*" to the backend.
+  // Rewrite to the canonical "/api/uploads/..." prefix so old + new posts both render.
+  const path = p.startsWith("/uploads/") ? `/api${p}` : p;
+  return `${BACKEND_URL}${path}`;
 };

@@ -461,7 +461,7 @@ async def export_design_png(design_id: str, token: str, attempts: int = 15) -> O
         fname = f"canva_{design_id[:10]}_{new_id()[:6]}.png"
         path = UPLOADS_DIR / fname
         path.write_bytes(dr.content)
-        return f"/uploads/{fname}"
+        return f"/api/uploads/{fname}"
     except Exception as e:
         logger.exception("Canva export_design_png exception: %s", e)
         return None

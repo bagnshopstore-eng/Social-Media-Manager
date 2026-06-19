@@ -51,7 +51,10 @@ security = HTTPBearer()
 
 UPLOADS_DIR = ROOT_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+# Mount under BOTH paths: /uploads for local dev (port 8001 direct),
+# and /api/uploads so the Kubernetes ingress (which only routes /api/* to backend) serves them externally.
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.mount("/api/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="api-uploads")
 
 
 # ---------- Auth ----------
