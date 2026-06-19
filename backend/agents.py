@@ -28,7 +28,8 @@ EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_ADMIN_TOKEN", "")
 SHOPIFY_STORE_URL = os.environ.get("SHOPIFY_STORE_URL", "").rstrip("/")
 POSTPROXY_KEY = os.environ.get("POSTPROXY_API_KEY", "")
-POSTPROXY_BASE = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.com/v1").rstrip("/")
+POSTPROXY_BASE = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.dev/api").rstrip("/")
+POSTPROXY_PROFILE_GROUP_ID = os.environ.get("POSTPROXY_PROFILE_GROUP_ID", "")
 USE_MOCK_PUBLISHER = os.environ.get("USE_MOCK_PUBLISHER", "true").lower() == "true"
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 APIFY_ACTOR = os.environ.get("APIFY_ACTOR", "apify~instagram-scraper")
@@ -99,63 +100,72 @@ def _mock_products() -> list[dict]:
 
 # -------- Postproxy: publish + analytics --------
 async def postproxy_publish(post: dict) -> dict:
-    """Publish a post via Postproxy. Returns {published_id, ok, raw}.
-    Tries the most common publish-endpoint patterns; logs and returns ok=False on any failure."""
+    """Publish a post via Postproxy (https://api.postproxy.dev/api/posts).
+    Returns {published_id, ok, raw}. Logs and returns ok=False on any failure."""
     if not POSTPROXY_KEY:
         return {"ok": False, "error": "POSTPROXY_API_KEY missing"}
     payload = {
+        "profile_group_id": POSTPROXY_PROFILE_GROUP_ID,
         "platforms": [post["platform"]],
         "caption": post["caption"],
         "media_urls": [assetify(u) for u in post.get("image_urls", [])],
         "scheduled_at": post.get("scheduled_datetime"),
         "format": post.get("format", "single_image"),
     }
-    headers = {
-        "Authorization": f"Bearer {POSTPROXY_KEY}",
-        "Content-Type": "application/json",
-    }
-    paths = ["/posts", "/post", "/publish", "/social-posts"]
+    if not POSTPROXY_PROFILE_GROUP_ID:
+        payload.pop("profile_group_id", None)
+    url = f"{POSTPROXY_BASE}/posts"
+    # Try both auth schemes (Postproxy.dev uses X-API-Key; legacy uses Bearer)
+    header_variants = [
+        {"X-API-Key": POSTPROXY_KEY, "Content-Type": "application/json"},
+        {"Authorization": f"Bearer {POSTPROXY_KEY}", "Content-Type": "application/json"},
+    ]
     async with httpx.AsyncClient(timeout=30) as cli:
-        for path in paths:
-            url = f"{POSTPROXY_BASE}{path}"
+        for headers in header_variants:
             try:
                 r = await cli.post(url, json=payload, headers=headers)
                 if r.status_code in (200, 201, 202):
                     data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
                     pub_id = (data.get("id") or data.get("post_id") or
-                              data.get("data", {}).get("id") if isinstance(data.get("data"), dict) else None)
+                              (data.get("data", {}).get("id") if isinstance(data.get("data"), dict) else None))
                     return {"ok": True, "published_id": pub_id or f"pp_{new_id()[:10]}",
-                            "raw": data, "endpoint": path}
-                logger.warning("Postproxy %s -> %s: %s", url, r.status_code, r.text[:300])
+                            "raw": data, "endpoint": url, "auth": list(headers.keys())[0]}
+                if r.status_code != 401:
+                    logger.warning("Postproxy %s -> %s: %s", url, r.status_code, r.text[:300])
+                    return {"ok": False, "error": f"{r.status_code}: {r.text[:300]}", "endpoint": url}
+                # 401 -> try next auth scheme
             except Exception as e:
                 logger.warning("Postproxy %s exception: %s", url, e)
-    return {"ok": False, "error": "All Postproxy publish paths failed"}
+    return {"ok": False, "error": "Postproxy publish failed (auth/network)"}
 
 
 async def postproxy_analytics(published_id: str) -> dict:
     """Fetch performance for a published post id. Returns dict or empty dict on failure."""
     if not POSTPROXY_KEY or not published_id:
         return {}
-    headers = {"Authorization": f"Bearer {POSTPROXY_KEY}"}
+    header_variants = [
+        {"X-API-Key": POSTPROXY_KEY},
+        {"Authorization": f"Bearer {POSTPROXY_KEY}"},
+    ]
     paths = [f"/posts/{published_id}/analytics", f"/posts/{published_id}", f"/analytics/{published_id}"]
     async with httpx.AsyncClient(timeout=15) as cli:
-        for path in paths:
-            try:
-                r = await cli.get(f"{POSTPROXY_BASE}{path}", headers=headers)
-                if r.status_code == 200:
-                    data = r.json()
-                    # normalise common shapes
-                    metrics = data.get("metrics") or data.get("analytics") or data
-                    if isinstance(metrics, dict):
-                        return {
-                            "likes": int(metrics.get("likes") or metrics.get("like_count") or 0),
-                            "comments": int(metrics.get("comments") or metrics.get("comment_count") or 0),
-                            "shares": int(metrics.get("shares") or metrics.get("share_count") or 0),
-                            "reach": int(metrics.get("reach") or metrics.get("impressions") or 0),
-                            "engagement_rate": float(metrics.get("engagement_rate") or 0.0),
-                        }
-            except Exception as e:
-                logger.warning("Postproxy analytics %s exception: %s", path, e)
+        for headers in header_variants:
+            for path in paths:
+                try:
+                    r = await cli.get(f"{POSTPROXY_BASE}{path}", headers=headers)
+                    if r.status_code == 200:
+                        data = r.json()
+                        metrics = data.get("metrics") or data.get("analytics") or data
+                        if isinstance(metrics, dict):
+                            return {
+                                "likes": int(metrics.get("likes") or metrics.get("like_count") or 0),
+                                "comments": int(metrics.get("comments") or metrics.get("comment_count") or 0),
+                                "shares": int(metrics.get("shares") or metrics.get("share_count") or 0),
+                                "reach": int(metrics.get("reach") or metrics.get("impressions") or 0),
+                                "engagement_rate": float(metrics.get("engagement_rate") or 0.0),
+                            }
+                except Exception as e:
+                    logger.warning("Postproxy analytics %s exception: %s", path, e)
     return {}
 
 

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
+import { ExternalLink, Plug, Unplug } from "lucide-react";
 
 const HealthTile = () => {
   const [data, setData] = useState(null);
@@ -8,6 +10,7 @@ const HealthTile = () => {
   const load = () => { setLoading(true); api.get("/integrations/health").then(r=>setData(r.data)).finally(()=>setLoading(false)); };
   useEffect(() => { load(); }, []);
   if (!data && !loading) return null;
+  const entries = data ? Object.entries(data).filter(([k]) => !k.startsWith("_")) : [];
   return (
     <section className="space-y-3" data-testid="health-tile">
       <div className="flex items-center justify-between">
@@ -15,15 +18,86 @@ const HealthTile = () => {
         <button onClick={load} disabled={loading} className="text-xs px-3 py-1.5 border border-zinc-300 rounded-md hover:bg-zinc-100" data-testid="health-refresh">{loading?"…":"Refresh"}</button>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {data && Object.entries(data).map(([name, v]) => (
+        {entries.map(([name, v]) => (
           <div key={name} className={`p-3 rounded-lg border ${v.ok?"border-emerald-200 bg-emerald-50":"border-rose-200 bg-rose-50"}`} data-testid={`health-${name}`}>
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${v.ok?"bg-emerald-500":"bg-rose-500"}`} />
-              <span className="font-medium text-sm capitalize">{name.replace("_"," ")}</span>
+              <span className="font-medium text-sm capitalize">{name.replace(/_/g," ")}</span>
             </div>
             <div className="text-xs text-zinc-600 mt-1 truncate" title={v.detail}>{v.status?`${v.status} · `:""}{v.detail}</div>
           </div>
         ))}
+      </div>
+      {data?._meta?.alerts?.alerted?.length > 0 && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 px-3 py-2 rounded">
+          Alerts fired for: {data._meta.alerts.alerted.join(", ")}
+        </div>
+      )}
+    </section>
+  );
+};
+
+const CanvaBlock = () => {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [params, setParams] = useSearchParams();
+
+  const load = () => api.get("/canva/status").then(r => setStatus(r.data)).catch(() => setStatus({connected:false,configured:false}));
+  useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    const c = params.get("canva");
+    if (c === "success") { toast.success("Canva connected!"); params.delete("canva"); setParams(params, { replace: true }); load(); }
+    else if (c === "error") { toast.error(`Canva connect failed${params.get("detail")?": "+params.get("detail"):""}`); params.delete("canva"); params.delete("detail"); setParams(params, { replace: true }); }
+  }, [params, setParams]);
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      const r = await api.get("/canva/connect");
+      window.location.href = r.data.authorize_url;
+    } catch (e) {
+      toast.error("Cannot start Canva OAuth. Check backend logs.");
+    } finally { setBusy(false); }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    try {
+      await api.post("/canva/disconnect");
+      toast.success("Canva disconnected.");
+      load();
+    } finally { setBusy(false); }
+  };
+
+  if (!status) return null;
+  return (
+    <section className="space-y-3" data-testid="canva-block">
+      <h2 className="font-display text-xl font-semibold">Canva (M6)</h2>
+      <div className="border border-zinc-200 rounded-lg p-5 bg-white flex items-center justify-between gap-4">
+        <div>
+          <div className="font-medium">Canva Connect</div>
+          <div className="text-xs text-zinc-500 mt-1">
+            {!status.configured && "Set CANVA_CLIENT_ID/SECRET in backend .env first."}
+            {status.configured && !status.connected && "Configured. Click Connect to authorize brand-template access."}
+            {status.connected && (
+              <>OAuth connected. Brand Templates + Autofill enabled in the Creative Agent.</>
+            )}
+          </div>
+        </div>
+        {status.configured && (
+          status.connected ? (
+            <button onClick={disconnect} disabled={busy} data-testid="settings-canva-disconnect"
+                    className="flex items-center gap-2 text-sm font-medium px-4 py-2 border border-rose-200 text-rose-700 rounded-md hover:bg-rose-50 disabled:opacity-50">
+              <Unplug size={14} /> Disconnect
+            </button>
+          ) : (
+            <button onClick={connect} disabled={busy} data-testid="settings-canva-connect"
+                    className="flex items-center gap-2 text-sm font-medium px-4 py-2 bg-zinc-900 text-white rounded-md hover:bg-zinc-700 disabled:opacity-50">
+              <Plug size={14} /> Connect Canva <ExternalLink size={12} />
+            </button>
+          )
+        )}
       </div>
     </section>
   );
@@ -58,6 +132,8 @@ export default function Settings() {
       </div>
 
       <HealthTile />
+
+      <CanvaBlock />
 
       <Section title="Brand">
         <Field label="Brand name"><input className="settings-input" value={brand.brand_name || ""} onChange={e=>update("brand_name", e.target.value)} data-testid="set-brand-name" /></Field>
@@ -99,11 +175,12 @@ export default function Settings() {
           <IntegrationRow label="Anthropic Claude (text)" status="connected" detail="via EMERGENT_LLM_KEY" />
           <IntegrationRow label="Gemini Nano Banana (images)" status="connected" detail="via EMERGENT_LLM_KEY" />
           <IntegrationRow label="Shopify Admin" status="connected" detail={brand.website} />
-          <IntegrationRow label="Postproxy (publish + analytics)" status="connected" detail="https://app.postproxy.dev/api (X-API-Key auth)" />
+          <IntegrationRow label="Postproxy (publish + analytics)" status="connected" detail="https://api.postproxy.dev/api/posts · profile group 60FLY0" />
           <IntegrationRow label="Apify Instagram scraper" status="connected" detail="red.cars/instagram-scraper-pro actor" />
-          <IntegrationRow label="Canva Connect (M6 — videos + branded)" status="connected" detail="Client ID + Secret stored; OAuth flow pending M6" />
-          <IntegrationRow label="Resend (email notifications)" status="off" detail="Add RESEND_API_KEY to .env to enable" />
-          <IntegrationRow label="APScheduler weekly cron" status="connected" detail="Sat 6am IST research · */15min publisher · Sun 7am optimizer" />
+          <IntegrationRow label="Canva Connect (M6 — branded templates + autofill)" status="connected" detail="Connect from the panel above to enable in Creative Agent" />
+          <IntegrationRow label="MailerSend (email notifications)" status="connected" detail="Set MAILERSEND_FROM_EMAIL in .env to enable sending" />
+          <IntegrationRow label="Slack alerts (health red flips)" status="connected" detail="Set SLACK_WEBHOOK_URL in .env · 30-min dedupe" />
+          <IntegrationRow label="APScheduler weekly cron" status="connected" detail="Sat 6am IST research · */15min publisher · Sun 7am optimizer · */5min health alerts" />
           <IntegrationRow label="Telegram bot" status="off" detail="Skipped" />
         </div>
       </Section>

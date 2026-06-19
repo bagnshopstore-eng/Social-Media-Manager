@@ -28,7 +28,8 @@ from agents import (
     run_audit_agent, run_strategist_agent, run_creative_for_slot,
     run_publisher_agent, run_optimizer_agent, fetch_shopify_products,
 )
-from scheduler import build_scheduler, send_email, SCHED_ENABLED
+from scheduler import build_scheduler, send_email, SCHED_ENABLED, check_health_and_alert
+from canva import build_router as build_canva_router
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
@@ -346,7 +347,7 @@ async def trigger_full_cycle(days: int = 7, creative_count: int = 7,
 async def notifications_test(email: str = Depends(require_admin)):
     ok = await send_email(
         "BagnShop AI — test email",
-        "<p>If you got this, Resend is wired up correctly.</p>",
+        "<p>If you got this, MailerSend is wired up correctly.</p>",
     )
     return {"sent": ok, "to": os.environ.get("NOTIFY_EMAIL", "")}
 
@@ -355,15 +356,27 @@ async def notifications_test(email: str = Depends(require_admin)):
 async def postproxy_diagnose(email: str = Depends(require_admin)):
     import httpx
     key = os.environ.get("POSTPROXY_API_KEY", "")
-    base = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.dev").rstrip("/")
+    base = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.dev/api").rstrip("/")
+    pg = os.environ.get("POSTPROXY_PROFILE_GROUP_ID", "")
     url = f"{base}/posts"
     if not key:
         return {"success": False, "error": "POSTPROXY_API_KEY missing in .env",
                 "url": url, "status_code": None, "body": None,
                 "key_present": False, "key_length": 0}
+    # try X-API-Key first, fallback to Bearer
+    headers_variants = [
+        {"X-API-Key": key},
+        {"Authorization": f"Bearer {key}"},
+    ]
+    last = None
     try:
         async with httpx.AsyncClient(timeout=15) as cli:
-            r = await cli.get(url, headers={"Authorization": f"Bearer {key}"})
+            for h in headers_variants:
+                r = await cli.get(url, headers=h)
+                last = r
+                if r.status_code != 401:
+                    break
+        r = last
         try:
             body = r.json()
         except Exception:
@@ -372,7 +385,9 @@ async def postproxy_diagnose(email: str = Depends(require_admin)):
             "success": 200 <= r.status_code < 300,
             "status_code": r.status_code,
             "url": url,
-            "auth_header": "Authorization: Bearer",
+            "auth_header": list((headers_variants[0] if r is headers_variants else headers_variants[-1]).keys())[0]
+                if hasattr(headers_variants, "keys") else "X-API-Key or Authorization",
+            "profile_group_id": pg,
             "key_length": len(key),
             "key_preview": f"{key[:6]}...{key[-4:]}",
             "body": body,
@@ -392,42 +407,54 @@ async def postproxy_diagnose(email: str = Depends(require_admin)):
                 "body": None}
 
 
-@api.get("/integrations/health")
-async def integrations_health(email: str = Depends(require_admin)):
-    """One-shot health check for every external integration."""
+async def _collect_integrations_health(db_obj) -> dict:
+    """Compute health snapshot for every external integration. Reusable by endpoint + scheduler."""
     import httpx
-    results = {}
+    results: dict = {}
 
     # Postproxy
     pk = os.environ.get("POSTPROXY_API_KEY", "")
-    pbase = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.dev").rstrip("/")
+    pbase = os.environ.get("POSTPROXY_BASE_URL", "https://api.postproxy.dev/api").rstrip("/")
     if not pk:
         results["postproxy"] = {"ok": False, "detail": "POSTPROXY_API_KEY missing"}
     else:
         try:
             async with httpx.AsyncClient(timeout=10) as cli:
-                r = await cli.get(f"{pbase}/posts", headers={"Authorization": f"Bearer {pk}"})
+                # try X-API-Key first then Bearer
+                r = await cli.get(f"{pbase}/posts", headers={"X-API-Key": pk})
+                if r.status_code == 401:
+                    r = await cli.get(f"{pbase}/posts", headers={"Authorization": f"Bearer {pk}"})
+            detail = ""
+            try:
+                jd = r.json()
+                detail = (jd.get("error") or jd.get("message") or "")[:80] if isinstance(jd, dict) else ""
+            except Exception:
+                detail = r.text[:80]
             results["postproxy"] = {"ok": 200 <= r.status_code < 300,
-                                     "status": r.status_code,
-                                     "detail": (r.json().get("error") if r.headers.get("content-type","").startswith("application/json") else r.text[:80])}
+                                    "status": r.status_code,
+                                    "detail": detail or ("OK" if 200 <= r.status_code < 300 else "Error")}
         except Exception as e:
             results["postproxy"] = {"ok": False, "detail": f"Network: {e}"}
 
-    # Resend
-    rk = os.environ.get("RESEND_API_KEY", "")
-    if not rk:
-        results["resend"] = {"ok": False, "detail": "RESEND_API_KEY missing"}
+    # MailerSend
+    mk = os.environ.get("MAILERSEND_API_KEY", "")
+    mfrom = os.environ.get("MAILERSEND_FROM_EMAIL", "")
+    if not mk:
+        results["mailersend"] = {"ok": False, "detail": "MAILERSEND_API_KEY missing"}
     else:
         try:
             async with httpx.AsyncClient(timeout=10) as cli:
-                r = await cli.get("https://api.resend.com/domains", headers={"Authorization": f"Bearer {rk}"})
-            results["resend"] = {"ok": r.status_code in (200, 401),  # send-only keys 401 on /domains but still send
-                                 "status": r.status_code,
-                                 "detail": ("Authenticated" if r.status_code==200
-                                            else ("Send-only key (works for emails)" if r.status_code==401
-                                                  else r.text[:80]))}
+                r = await cli.get("https://api.mailersend.com/v1/domains",
+                                  headers={"Authorization": f"Bearer {mk}"})
+            if r.status_code == 200:
+                detail = "Authenticated" + ("" if mfrom else " (MAILERSEND_FROM_EMAIL not set)")
+                ok = bool(mfrom)
+            else:
+                detail = r.text[:80]
+                ok = False
+            results["mailersend"] = {"ok": ok, "status": r.status_code, "detail": detail}
         except Exception as e:
-            results["resend"] = {"ok": False, "detail": f"Network: {e}"}
+            results["mailersend"] = {"ok": False, "detail": f"Network: {e}"}
 
     # Apify
     ak = os.environ.get("APIFY_TOKEN", "")
@@ -438,7 +465,7 @@ async def integrations_health(email: str = Depends(require_admin)):
             async with httpx.AsyncClient(timeout=10) as cli:
                 r = await cli.get(f"https://api.apify.com/v2/users/me?token={ak}")
             results["apify"] = {"ok": r.status_code == 200, "status": r.status_code,
-                                "detail": "Authenticated" if r.status_code==200 else r.text[:80]}
+                                "detail": "Authenticated" if r.status_code == 200 else r.text[:80]}
         except Exception as e:
             results["apify"] = {"ok": False, "detail": f"Network: {e}"}
 
@@ -453,20 +480,45 @@ async def integrations_health(email: str = Depends(require_admin)):
                 r = await cli.get(f"{su}/admin/api/2024-01/shop.json",
                                   headers={"X-Shopify-Access-Token": sk})
             results["shopify"] = {"ok": r.status_code == 200, "status": r.status_code,
-                                  "detail": "Authenticated" if r.status_code==200 else r.text[:80]}
+                                  "detail": "Authenticated" if r.status_code == 200 else r.text[:80]}
         except Exception as e:
             results["shopify"] = {"ok": False, "detail": f"Network: {e}"}
 
     # Emergent LLM
     ek = os.environ.get("EMERGENT_LLM_KEY", "")
-    results["emergent_llm"] = {"ok": bool(ek), "detail": "Configured" if ek else "EMERGENT_LLM_KEY missing"}
+    results["emergent_llm"] = {"ok": bool(ek),
+                               "detail": "Configured" if ek else "EMERGENT_LLM_KEY missing"}
 
     # Canva
     cid = os.environ.get("CANVA_CLIENT_ID", "")
     csec = os.environ.get("CANVA_CLIENT_SECRET", "")
-    results["canva"] = {"ok": bool(cid and csec),
-                       "detail": "Client ID + Secret stored (OAuth flow pending M6)" if cid and csec else "Missing credentials"}
+    if not (cid and csec):
+        results["canva"] = {"ok": False, "detail": "CANVA_CLIENT_ID/SECRET missing"}
+    else:
+        tok_doc = await db_obj.canva_tokens.find_one({"id": "canva_admin"}, {"_id": 0})
+        if tok_doc and tok_doc.get("access_token"):
+            results["canva"] = {"ok": True, "detail": "OAuth connected"}
+        else:
+            results["canva"] = {"ok": False, "detail": "Credentials stored; click Connect to authorize"}
 
+    # Slack webhook
+    sw = os.environ.get("SLACK_WEBHOOK_URL", "")
+    results["slack_alerts"] = {"ok": bool(sw),
+                               "detail": "Webhook configured" if sw else "SLACK_WEBHOOK_URL missing"}
+
+    return results
+
+
+@api.get("/integrations/health")
+async def integrations_health(email: str = Depends(require_admin)):
+    """One-shot health check for every external integration. Also triggers Slack/Discord
+    alerts on any green->red flip (30-min dedupe per service)."""
+    results = await _collect_integrations_health(db)
+    try:
+        alerts = await check_health_and_alert(db, results)
+        results["_meta"] = {"alerts": alerts}
+    except Exception as e:
+        logger.warning("Health alert check failed: %s", e)
     return results
 
 
@@ -509,9 +561,10 @@ async def on_startup():
         app.state.scheduler = build_scheduler(
             db, run_audit_agent, run_strategist_agent, run_creative_for_slot,
             run_publisher_agent, run_optimizer_agent,
+            health_fn=_collect_integrations_health,
         )
         app.state.scheduler.start()
-        logger.info("Scheduler started (Sat 6am IST research, */15min publisher, Sun 7am optimizer)")
+        logger.info("Scheduler started (Sat 6am IST research, */15min publisher, Sun 7am optimizer, */5min health alerts)")
 
 
 @app.on_event("shutdown")
@@ -522,6 +575,7 @@ async def on_shutdown():
 
 
 app.include_router(api)
+app.include_router(build_canva_router(db, require_admin))
 
 app.add_middleware(
     CORSMiddleware,

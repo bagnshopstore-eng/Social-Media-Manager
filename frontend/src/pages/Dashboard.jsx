@@ -2,8 +2,9 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "@/lib/api";
 import PostCard from "@/components/PostCard";
 import EditPostDialog from "@/components/EditPostDialog";
+import CanvaTemplatePicker from "@/components/CanvaTemplatePicker";
 import { toast } from "sonner";
-import { Sparkles, Send, RefreshCw, Inbox } from "lucide-react";
+import { Sparkles, Send, RefreshCw, Inbox, Palette } from "lucide-react";
 
 const groupByDate = (posts) => {
   const groups = {};
@@ -22,6 +23,7 @@ export default function Dashboard() {
   const [generating, setGenerating] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [filter, setFilter] = useState("pending_approval");
+  const [canvaOpen, setCanvaOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,6 +107,14 @@ export default function Dashboard() {
             className="flex items-center gap-2 bg-zinc-900 text-white text-sm font-medium px-4 py-2 rounded-md hover:bg-zinc-700 active:scale-[0.99] transition disabled:opacity-50"
           >
             <Sparkles size={14} /> {generating ? "Generating..." : "Generate next week"}
+          </button>
+          <button
+            onClick={() => setCanvaOpen(true)}
+            data-testid="open-canva-picker"
+            className="flex items-center gap-2 border border-zinc-300 text-zinc-800 text-sm font-medium px-4 py-2 rounded-md hover:bg-zinc-100 active:scale-[0.99] transition"
+            title="Pick a Canva brand template and autofill"
+          >
+            <Palette size={14} /> Canva template
           </button>
           <button
             onClick={runPublisher}
@@ -192,6 +202,14 @@ export default function Dashboard() {
         open={!!editing}
         onClose={() => setEditing(null)}
         onSave={saveEdit}
+      />
+
+      <CanvaTemplatePicker
+        open={canvaOpen}
+        onClose={() => setCanvaOpen(false)}
+        onDesignReady={(design) => {
+          toast.success(`Design "${design.template_title}" ready in Canva.`);
+        }}
       />
     </div>
   );

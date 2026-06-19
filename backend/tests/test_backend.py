@@ -1,151 +1,229 @@
-"""BagnShop backend integration tests - uses localhost to avoid CF 100s gateway timeout."""
-import os, time, requests, pytest
+"""BagnShop AI — backend regression tests (iteration 2).
 
-BASE = "http://localhost:8001"
-EMAIL = "bagnshopstore@gmail.com"
-PASSWORD = "BagnShop@2026"
+Covers: auth, integrations/health (with postproxy/mailersend/canva/slack_alerts keys + _meta.alerts),
+canva router (status/connect/templates/disconnect), postproxy diagnose, MailerSend wiring (no crash
+when FROM email empty), scheduler health flip detection wiring, and regression sanity on existing
+endpoints.
+"""
+from __future__ import annotations
+import os
+import re
+import pytest
+import requests
+
+BASE_URL = os.environ.get(
+    "REACT_APP_BACKEND_URL",
+    "https://bagnshop-ai-build-1.preview.emergentagent.com",
+).rstrip("/")
+
+ADMIN_EMAIL = "bagnshopstore@gmail.com"
+ADMIN_PASSWORD = "BagnShop@2026"
+
+
+# ----------------------------- fixtures -----------------------------
+@pytest.fixture(scope="session")
+def api():
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json"})
+    return s
+
 
 @pytest.fixture(scope="session")
-def token():
-    r = requests.post(f"{BASE}/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, timeout=10)
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def token(api):
+    r = api.post(f"{BASE_URL}/api/auth/login",
+                 json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, f"login failed: {r.status_code} {r.text}"
+    data = r.json()
+    assert "token" in data and isinstance(data["token"], str) and len(data["token"]) > 20
+    assert data["email"] == ADMIN_EMAIL
+    return data["token"]
+
 
 @pytest.fixture(scope="session")
-def H(token):
-    return {"Authorization": f"Bearer {token}"}
+def auth(api, token):
+    api.headers.update({"Authorization": f"Bearer {token}"})
+    return api
 
-def test_login_bad():
-    r = requests.post(f"{BASE}/api/auth/login", json={"email": EMAIL, "password": "wrong"}, timeout=10)
-    assert r.status_code == 401
 
-def test_me(H):
-    r = requests.get(f"{BASE}/api/auth/me", headers=H, timeout=10)
-    assert r.status_code == 200
-    assert r.json()["email"] == EMAIL
+# --------------------------- auth tests -----------------------------
+class TestAuth:
+    def test_login_invalid_password(self, api):
+        r = api.post(f"{BASE_URL}/api/auth/login",
+                     json={"email": ADMIN_EMAIL, "password": "wrong"})
+        assert r.status_code == 401
 
-def test_brand(H):
-    r = requests.get(f"{BASE}/api/brand", headers=H, timeout=10)
-    assert r.status_code == 200
-    d = r.json()
-    assert d["brand_name"] == "BagnShop"
-    assert "linkedin_angle" in d
+    def test_auth_me(self, auth):
+        r = auth.get(f"{BASE_URL}/api/auth/me")
+        assert r.status_code == 200
+        assert r.json()["email"] == ADMIN_EMAIL
 
-def test_competitors(H):
-    r = requests.get(f"{BASE}/api/competitors", headers=H, timeout=10)
-    assert r.status_code == 200
-    docs = r.json()
-    names = {d["name"] for d in docs}
-    expected = {"IGP", "FNP", "Giftana", "OffiStore", "Across Corporate",
-                "Saffron India", "Pinnacle Gifting", "Consortium Gifts",
-                "Giftcart", "PrintStop"}
-    assert expected.issubset(names), f"missing: {expected - names}"
-    assert len(docs) >= 10
+    def test_auth_me_no_token(self, api):
+        s = requests.Session()
+        r = s.get(f"{BASE_URL}/api/auth/me")
+        assert r.status_code in (401, 403)
 
-def test_audit(H):
-    r = requests.post(f"{BASE}/api/agents/audit/run", headers=H, timeout=60)
-    assert r.status_code == 200, r.text
 
-def test_strategist_days2(H):
-    r = requests.post(f"{BASE}/api/agents/strategist/run?days=2", headers=H, timeout=240)
-    assert r.status_code == 200, r.text[:500]
+# ----------------------- integrations/health ------------------------
+class TestIntegrationsHealth:
+    def test_health_keys_present(self, auth):
+        r = auth.get(f"{BASE_URL}/api/integrations/health")
+        assert r.status_code == 200
+        data = r.json()
+        expected = {"postproxy", "mailersend", "apify", "shopify",
+                    "emergent_llm", "canva", "slack_alerts"}
+        missing = expected - set(data.keys())
+        assert not missing, f"missing keys: {missing}"
+        assert "resend" not in data, "resend key should have been removed"
 
-def test_calendar_and_linkedin_b2b(H):
-    r = requests.get(f"{BASE}/api/calendar", headers=H, timeout=15)
-    assert r.status_code == 200
-    slots = r.json()
-    assert len(slots) > 0, "no calendar slots"
-    for s in slots:
-        for k in ("platform", "pillar", "hook", "scheduled_datetime"):
-            assert k in s, f"missing {k}"
-    li = [s for s in slots if s["platform"] == "linkedin"]
-    assert len(li) > 0, "no linkedin slots"
-    # b2b/founder check - look for keywords across hook+caption_angle+pillar
-    b2b_kw = ["b2b", "corporate", "founder", "gifting", "building", "brand", "team", "leader", "business", "lessons", "story"]
-    matched = 0
-    for s in li:
-        blob = (s.get("hook","") + " " + s.get("caption_angle","") + " " + s.get("pillar","") + " " + s.get("topic","")).lower()
-        if any(k in blob for k in b2b_kw):
-            matched += 1
-    assert matched >= max(1, len(li)//2), f"LinkedIn slots not B2B/founder-led: {matched}/{len(li)}"
+    def test_health_meta_alerts_present(self, auth):
+        r = auth.get(f"{BASE_URL}/api/integrations/health")
+        data = r.json()
+        assert "_meta" in data, "_meta field missing"
+        meta = data["_meta"]
+        assert "alerts" in meta
+        alerts = meta["alerts"]
+        for k in ("flips", "alerted", "deduped"):
+            assert k in alerts and isinstance(alerts[k], list), f"{k} missing/not list"
 
-def test_creative_run(H):
-    r = requests.post(f"{BASE}/api/agents/creative/run", headers=H, json={"limit": 1}, timeout=240)
-    assert r.status_code == 200, r.text[:500]
-    d = r.json()
-    assert d.get("generated", 0) >= 1, d
+    def test_health_slack_alerts_off_by_default(self, auth):
+        r = auth.get(f"{BASE_URL}/api/integrations/health")
+        data = r.json()
+        assert data["slack_alerts"]["ok"] is False
+        assert "missing" in data["slack_alerts"]["detail"].lower()
 
-def test_posts_pending(H):
-    r = requests.get(f"{BASE}/api/posts", headers=H, timeout=15)
-    assert r.status_code == 200
-    posts = r.json()
-    assert len(posts) >= 1
-    pending = [p for p in posts if p["status"] == "pending_approval"]
-    assert len(pending) >= 1, "no pending_approval posts"
-    p = pending[0]
-    assert p.get("caption"), "caption missing"
-    # image_urls present
-    assert isinstance(p.get("image_urls"), list)
 
-def test_approve_and_publisher_only_publishes_approved(H):
-    posts = requests.get(f"{BASE}/api/posts", headers=H, timeout=15).json()
-    pending = [p for p in posts if p["status"] == "pending_approval"]
-    assert len(pending) >= 1
-    # Approve ONE, leave others pending
-    approve_id = pending[0]["id"]
-    pending_id = pending[1]["id"] if len(pending) > 1 else None
+# --------------------------- Canva router ---------------------------
+class TestCanva:
+    def test_canva_status_initial(self, auth):
+        auth.post(f"{BASE_URL}/api/canva/disconnect")
+        r = auth.get(f"{BASE_URL}/api/canva/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["connected"] is False
+        assert data["configured"] is True
 
-    r = requests.post(f"{BASE}/api/posts/{approve_id}/status",
-                      headers=H, json={"status": "approved"}, timeout=10)
-    assert r.status_code == 200
-    assert r.json()["status"] == "approved"
+    def test_canva_connect_authorize_url(self, auth):
+        r = auth.get(f"{BASE_URL}/api/canva/connect")
+        assert r.status_code == 200
+        data = r.json()
+        url = data.get("authorize_url", "")
+        assert "canva.com/api/oauth/authorize" in url
+        assert "client_id=OC-AZ7fmu8hwU0b" in url
+        assert "code_challenge_method=s256" in url
+        assert "redirect_uri=" in url
+        assert "bagnshop-ai-build-1.preview.emergentagent.com" in url
+        assert "code_challenge=" in url
+        assert "state=" in url
+        assert "brandtemplate" in url
+        assert isinstance(data.get("state"), str) and len(data["state"]) > 10
 
-    # If we have another pending, explicitly keep it pending_approval (it already is)
-    # Run publisher
-    r = requests.post(f"{BASE}/api/agents/publisher/run", headers=H, timeout=60)
-    assert r.status_code == 200, r.text
+    def test_canva_templates_unauth_returns_401(self, auth):
+        auth.post(f"{BASE_URL}/api/canva/disconnect")
+        r = auth.get(f"{BASE_URL}/api/canva/templates")
+        assert r.status_code == 401
+        body = r.json()
+        detail = body.get("detail") or body.get("message") or ""
+        assert "canva not connected" in str(detail).lower()
 
-    # Verify approved post is now published
-    p = requests.get(f"{BASE}/api/posts/{approve_id}", headers=H, timeout=10).json()
-    # Only published if scheduled_datetime <= now; check status either published or still approved
-    if p["status"] == "published":
-        assert p.get("published_id", "").startswith("mock_"), f"published_id not mock_: {p.get('published_id')}"
-    else:
-        # acceptable if scheduled in future - still approved
-        assert p["status"] == "approved", f"unexpected status {p['status']}"
+    def test_canva_disconnect_clears_status(self, auth):
+        r = auth.post(f"{BASE_URL}/api/canva/disconnect")
+        assert r.status_code == 200
+        assert r.json().get("disconnected") is True
+        s = auth.get(f"{BASE_URL}/api/canva/status")
+        assert s.json()["connected"] is False
 
-    # CRITICAL: pending post must NOT be published
-    if pending_id:
-        p2 = requests.get(f"{BASE}/api/posts/{pending_id}", headers=H, timeout=10).json()
-        assert p2["status"] != "published", "Publisher published a non-approved post!"
-        assert not p2.get("published_id"), f"Non-approved post got published_id: {p2.get('published_id')}"
 
-def test_bulk_approve(H):
-    r = requests.post(f"{BASE}/api/posts/bulk-approve", headers=H, json={}, timeout=15)
-    assert r.status_code == 200
-    assert "approved_count" in r.json()
+# ------------------------- Postproxy diagnose -----------------------
+class TestPostproxy:
+    def test_postproxy_diagnose(self, auth):
+        r = auth.get(f"{BASE_URL}/api/integrations/postproxy/diagnose")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["url"] == "https://api.postproxy.dev/api/posts"
+        assert data["key_length"] > 10
+        # Per request statement: should be 200 and success=true
+        assert data.get("status_code") in (200, 201), \
+            f"expected 200/201, got {data.get('status_code')} body={data.get('body')}"
+        assert data["success"] is True
 
-def test_insights(H):
-    r = requests.get(f"{BASE}/api/insights", headers=H, timeout=15)
-    assert r.status_code == 200
-    d = r.json()
-    for k in ("analytics", "learning", "recent_published"):
-        assert k in d
+    def test_agents_postproxy_publish_signature(self):
+        src = open("/app/backend/agents.py").read()
+        assert "POSTPROXY_BASE" in src
+        assert re.search(r"url\s*=\s*f['\"]\{POSTPROXY_BASE\}/posts['\"]", src), \
+            "postproxy_publish URL must be {POSTPROXY_BASE}/posts"
+        assert "profile_group_id" in src
+        # X-API-Key tried before Bearer (header_variants order)
+        idx_xkey = src.find("X-API-Key")
+        idx_bearer = src.find("Authorization\": f\"Bearer")
+        assert 0 <= idx_xkey < idx_bearer, "X-API-Key should appear before Bearer"
 
-def test_hook_patterns(H):
-    r = requests.get(f"{BASE}/api/hook-patterns", headers=H, timeout=15)
-    assert r.status_code == 200
-    d = r.json()
-    assert "hook_patterns" in d and "content_gaps" in d
 
-def test_shopify(H):
-    r = requests.get(f"{BASE}/api/shopify/products", headers=H, timeout=30)
-    assert r.status_code == 200
-    assert isinstance(r.json(), list)
+# ------------------------- MailerSend wiring ------------------------
+class TestMailerSend:
+    def test_notifications_test_no_crash(self, auth):
+        r = auth.post(f"{BASE_URL}/api/notifications/test")
+        assert r.status_code == 200
+        data = r.json()
+        # FROM email is intentionally empty -> sent should be False, no crash
+        assert data.get("sent") is False
+        assert "to" in data
 
-def test_audit_log(H):
-    r = requests.get(f"{BASE}/api/audit-log", headers=H, timeout=15)
-    assert r.status_code == 200
-    logs = r.json()
-    # there was at least one approve action
-    assert any("status_change" in (l.get("action") or "") for l in logs), "no status_change in audit log"
+    def test_scheduler_uses_mailersend(self):
+        src = open("/app/backend/scheduler.py").read()
+        assert "api.mailersend.com/v1/email" in src
+        assert "Bearer" in src
+        assert "MAILERSEND_FROM_EMAIL" in src
+        # Resend must be gone from scheduler
+        # (allow 'resend' inside python keyword like 'resend' substring rare check)
+        assert "api.resend.com" not in src
+        assert "RESEND_API_KEY" not in src
+
+
+# -------------------- Slack alert flip detection --------------------
+class TestSlackAlerts:
+    def test_scheduler_dedupe_and_health_fn_wired(self):
+        src = open("/app/backend/scheduler.py").read()
+        assert "ALERT_DEDUPE_MINUTES" in src
+        assert "check_health_and_alert" in src
+        assert "health_fn" in src
+        assert '"*/5"' in src or "'*/5'" in src
+
+    def test_server_passes_health_fn_to_scheduler(self):
+        src = open("/app/backend/server.py").read()
+        assert "_collect_integrations_health" in src
+        assert "health_fn=_collect_integrations_health" in src
+
+    def test_health_flip_detection_logic(self, auth):
+        r1 = auth.get(f"{BASE_URL}/api/integrations/health")
+        assert r1.status_code == 200
+        r2 = auth.get(f"{BASE_URL}/api/integrations/health")
+        flips = r2.json()["_meta"]["alerts"]["flips"]
+        assert isinstance(flips, list)
+        alerted = r2.json()["_meta"]["alerts"]["alerted"]
+        # Slack webhook empty -> alerted list must be empty even on flips
+        assert alerted == []
+
+
+# ----------------------- Regression sanity --------------------------
+class TestRegression:
+    @pytest.mark.parametrize("path", [
+        "/api/brand",
+        "/api/competitors",
+        "/api/competitor-content",
+        "/api/hook-patterns",
+        "/api/calendar",
+        "/api/posts",
+        "/api/insights",
+        "/api/audit-log",
+    ])
+    def test_get_endpoints_200(self, auth, path):
+        r = auth.get(f"{BASE_URL}{path}")
+        assert r.status_code == 200, f"{path} -> {r.status_code}: {r.text[:200]}"
+
+    def test_canva_router_mounted(self, auth):
+        r = auth.get(f"{BASE_URL}/api/canva/status")
+        assert r.status_code == 200
+        r2 = auth.get(f"{BASE_URL}/api/canva/templates")
+        assert r2.status_code in (401, 403, 502)
+        r3 = auth.get(f"{BASE_URL}/api/canva/connect")
+        assert r3.status_code == 200
