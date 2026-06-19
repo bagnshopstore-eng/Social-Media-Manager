@@ -1,4 +1,4 @@
-"""Canva Connect API: OAuth (PKCE) + Brand Templates + Autofill."""
+"""Canva Connect API: OAuth (PKCE) + Brand Templates + Autofill + Exports."""
 from __future__ import annotations
 import os
 import base64
@@ -7,6 +7,7 @@ import secrets
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -21,6 +22,8 @@ CANVA_CLIENT_ID = os.environ.get("CANVA_CLIENT_ID", "")
 CANVA_CLIENT_SECRET = os.environ.get("CANVA_CLIENT_SECRET", "")
 CANVA_REDIRECT_URI = os.environ.get("CANVA_REDIRECT_URI", "")
 PUBLIC_URL = os.environ.get("PUBLIC_BACKEND_URL", "").rstrip("/")
+UPLOADS_DIR = Path(__file__).parent / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 CANVA_AUTH_URL = "https://www.canva.com/api/oauth/authorize"
 CANVA_TOKEN_URL = "https://api.canva.com/rest/v1/oauth/token"
@@ -304,10 +307,17 @@ def build_router(db, require_admin) -> APIRouter:
         job_id = job.get("id")
         final = await _poll_autofill_job(db, job_id, token, attempts=15)
         design = (final.get("result") or {}).get("design") or {}
+        design_id = design.get("id")
         design_url = design.get("url")
         thumb_url = (design.get("thumbnail") or {}).get("url") or design_url
-        if not thumb_url:
+        if not design_id and not thumb_url:
             raise HTTPException(504, f"Canva autofill did not complete in time. Job: {job_id}")
+
+        # Try to export as high-res PNG → falls back to thumbnail URL if export fails
+        png_local_url = await export_design_png(design_id, token) if design_id else None
+        image_url = png_local_url or thumb_url
+        if not image_url:
+            raise HTTPException(504, f"Canva autofill did not produce an image. Job: {job_id}")
 
         system = (
             f"You write social captions for BagnShop. Voice: {', '.join(brand.voice_rules)}. "
@@ -334,7 +344,7 @@ def build_router(db, require_admin) -> APIRouter:
             platform=slot.platform,
             format=slot.format,
             caption=caption,
-            image_urls=[thumb_url],
+            image_urls=[image_url],
             hook=slot.hook,
             pillar=slot.pillar,
             cta=slot.cta,
@@ -353,8 +363,10 @@ def build_router(db, require_admin) -> APIRouter:
         post_doc["canva"] = {
             "template_id": body.template_id,
             "job_id": job_id,
+            "design_id": design_id,
             "design_url": design_url,
             "thumbnail_url": thumb_url,
+            "exported_png": png_local_url,
         }
         await db.posts.insert_one(post_doc)
         await db.content_calendar.update_one(
@@ -364,7 +376,8 @@ def build_router(db, require_admin) -> APIRouter:
             "post_id": post.id,
             "status": post.status,
             "issues": post.guardrail_issues,
-            "image_url": thumb_url,
+            "image_url": image_url,
+            "exported_png": png_local_url,
             "design_url": design_url,
         }
 
@@ -392,3 +405,61 @@ async def _poll_autofill_job(db, job_id: str, token: str, attempts: int = 10) ->
         except Exception as e:
             logger.warning("Canva poll exception: %s", e)
     return {"status": "in_progress", "job_id": job_id}
+
+
+async def export_design_png(design_id: str, token: str, attempts: int = 15) -> Optional[str]:
+    """Export a Canva design as PNG, download it, save to /uploads, return relative URL.
+    Returns None on failure — caller should fall back to thumbnail URL."""
+    if not design_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.post(
+                f"{CANVA_API}/exports",
+                json={"design_id": design_id, "format": {"type": "png"}},
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+            )
+        if r.status_code not in (200, 201, 202):
+            logger.warning("Canva export start %s: %s", r.status_code, r.text[:200])
+            return None
+        job = (r.json().get("job") or r.json())
+        job_id = job.get("id")
+        if not job_id:
+            return None
+        # poll
+        download_urls: list[str] = []
+        for i in range(attempts):
+            await asyncio.sleep(2 + i * 0.3)
+            try:
+                async with httpx.AsyncClient(timeout=15) as cli:
+                    pr = await cli.get(
+                        f"{CANVA_API}/exports/{job_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                if pr.status_code != 200:
+                    continue
+                data = pr.json()
+                jj = data.get("job", data)
+                if jj.get("status") in ("failed", "error"):
+                    logger.warning("Canva export job failed: %s", jj)
+                    return None
+                if jj.get("status") in ("success", "completed"):
+                    download_urls = jj.get("urls") or []
+                    break
+            except Exception as e:
+                logger.warning("Canva export poll exception: %s", e)
+        if not download_urls:
+            return None
+        # download first PNG and persist
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
+            dr = await cli.get(download_urls[0])
+        if dr.status_code != 200 or not dr.content:
+            return None
+        fname = f"canva_{design_id[:10]}_{new_id()[:6]}.png"
+        path = UPLOADS_DIR / fname
+        path.write_bytes(dr.content)
+        return f"/uploads/{fname}"
+    except Exception as e:
+        logger.exception("Canva export_design_png exception: %s", e)
+        return None

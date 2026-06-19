@@ -51,11 +51,15 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady, slot
       setSelected(null); setTextValue(""); setResult(null); setChosenSlot("");
       return;
     }
+    // Pre-select the slot if only one was passed (per-slot launch from Calendar)
+    if (slots && slots.length === 1) {
+      setChosenSlot(slots[0].id);
+    }
     (async () => {
       const s = await loadStatus();
       if (s?.connected) await loadTemplates();
     })();
-  }, [open]);
+  }, [open, slots]);
 
   const connect = async () => {
     try {

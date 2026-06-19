@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 4 backend testing complete — 45/45 pytest cases pass (100%). 12 new iteration-4 tests added on top of the iteration-3 suite. Two P2 deliverables verified statically + live regression: (1) Canva /v1/exports high-res PNG export helper, (2) clickable Calendar planned slots launching CanvaTemplatePicker. Per the agent-to-agent note, no live Canva-OAuth call attempted (user has not completed OAuth yet) — only static src verification + the documented 401/404 regression paths. Backend /api/canva/create-post still correctly returns 404 'Calendar slot not found' for invalid slots and 401 'Canva not connected' for valid slots without OAuth. All regression endpoints (/api/integrations/health, /api/canva/status|connect|templates, /api/posts, /api/calendar, /api/auth/login, /api/brand, /api/competitors, /api/competitor-content, /api/hook-patterns, /api/insights, /api/audit-log) still return their expected shapes and status codes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/app/backend/canva.py:432", "issue": "export_design_png() poll loop creates a NEW httpx.AsyncClient inside every iteration (lines 435 + 455) — minor perf only; works correctly. Could be hoisted to one client per call."},
+      {"endpoint": "/app/backend/canva.py:447", "issue": "Status check accepts both 'success' AND 'completed' which is good for Canva-API tolerance, but ('failed','error') vs ('success','completed') is asymmetric — Canva docs only define 'success'|'failed' for /exports. The extra 'completed'/'error' tolerance is harmless safety."},
+      {"endpoint": "/app/backend/canva.py:317", "issue": "create_post_from_template only calls export_design_png when design_id is truthy; if Canva returns only a thumbnail URL but no design_id, the post silently falls back to thumb_url (which is what we want), but logs nothing — consider a logger.info() for observability when fallback triggers."},
+      {"endpoint": "/app/backend/canva.py:267 (carried from iter3)", "issue": "Dead-code `_UnusedReqAlias` class still inside build_router — cosmetic only, safe to remove."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend.py",
+    "/app/test_reports/pytest/iter4_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Remove dead `_UnusedReqAlias` class inside build_router at canva.py:267 (carried from iter3).",
+    "(Optional) Add logger.info() in create_post_from_template when png_local_url is None and we fall back to thumb_url, for export-failure observability.",
+    "(Reminder) Canva OAuth still needs to be completed by user. Until then /api/canva/create-post and /api/canva/templates correctly 401 — verified. Once connected, retest the export PNG flow end-to-end (export job poll + /uploads/canva_*.png file write) with a live design_id.",
+    "(Next iteration, frontend) Once OAuth completes, e2e-test the Calendar page: click a planned slot pill → assert CanvaTemplatePicker opens with single slot pre-selected → run create-post → verify post appears in /api/posts with canva.exported_png populated."
+  ],
+  "critical_code_review_comments": [
+    "export_design_png() is correctly module-level (indent 0) at line 410 — NOT nested inside build_router(). This allows the create_post_from_template handler to import & call it via the module-level name without scope issues. Verified statically.",
+    "export_design_png signature `(design_id, token, attempts=15)` matches spec. Returns Optional[str] — relative `/uploads/<fname>` URL on success, None on every failure path (3+ early returns covered).",
+    "POST {CANVA_API}/exports with body {design_id, format:{type:'png'}} matches Canva REST v1 contract. Polls GET /exports/{job_id} with exponential-ish backoff (2 + i*0.3 seconds). Accepts both 'success' and 'completed' as terminal — tolerant to API minor variations.",
+    "create_post_from_template (line 271) correctly: (a) captures design_id from final.result.design.id, (b) awaits export_design_png(design_id, token), (c) falls back gracefully `image_url = png_local_url or thumb_url`, (d) raises 504 only if BOTH PNG export AND thumbnail are missing, (e) persists all four fields {design_id, design_url, thumbnail_url, exported_png} into post.canva — exported_png will be None when fallback triggered, which is the correct way to record what happened.",
+    "CalendarPage.jsx correctly: imports CanvaTemplatePicker, tracks pickerSlots/pickerOpen state, defines openCanvaForSlot(slot) which early-returns with a toast.message when slot.status !== 'planned' (so only planned slots can launch Canva — matches spec), renders <CanvaTemplatePicker slots={pickerSlots} ...>, and pills carry data-testid `cal-slot-${item.id}` plus hover-button `cal-slot-canva-${item.id}` for testability.",
+    "CanvaTemplatePicker.jsx useEffect on `[open, slots]` pre-selects chosenSlot=slots[0].id when slots.length === 1 (line 55-57). Also correctly clears state on close (line 50-52). The dependency array [open, slots] is correct — slots reference change on re-open will retrigger pre-selection.",
+    "Slot 404 still raised BEFORE 401 token check inside the create-post handler — preserved from iter3 and re-verified in iter4 live tests.",
+    "No mocked APIs introduced this iteration. Canva calls remain real (will 401 until user OAuth completes).",
+    "Test suite grew from 33 → 45 (12 new iteration-4 tests); all green."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend.py (added 2 new iteration-4 classes: TestIteration4ExportPng with 6 static src checks for export_design_png + create-post integration + CalendarPage + CanvaTemplatePicker; TestIteration4CreatePostRegression with 6 live regression tests on /api/canva/create-post, /api/canva/status, /api/canva/connect, /api/canva/templates, /api/integrations/health)"
+  ],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "n/a (not requested — backend-only)"},
+  "test_credentials": "Admin: bagnshopstore@gmail.com / BagnShop@2026 (seeded on startup from .env). JWT returned by /api/auth/login is valid for 30 days. /app/memory/test_credentials.md is still empty — please populate it for future agents.",
+  "seed_data_creation": "None — reused existing 19 auto-seeded calendar slots for /api/canva/create-post slot-validation tests. No TEST_ prefixed data created.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_backend.py now has 11 test classes (Auth, IntegrationsHealth, Canva, Postproxy, MailerSend, SlackAlerts, CanvaCreatePost [iter3], Iteration3StaticChecks, Iteration4ExportPng [NEW], Iteration4CreatePostRegression [NEW], Regression). Run: cd /app && python -m pytest backend/tests/test_backend.py -v. The iter4 static tests scan src files of canva.py + CalendarPage.jsx + CanvaTemplatePicker.jsx — if those files are refactored (e.g., extract handler to a service), update the regex/string assertions accordingly. The iter4 live tests intentionally disconnect Canva first (auth.post('/api/canva/disconnect')) so they assert the 401/404 negative paths. Once Canva OAuth is completed by user, the create-post 401 assertion will start failing — at that point upgrade `test_create_post_valid_slot_no_canva_returns_401` AND `test_create_post_valid_slot_no_canva_still_401` to live happy-path tests with a real brand_template_id, and add an assertion that the returned image_url either starts with `/uploads/canva_` (PNG export succeeded) or matches the thumbnail URL pattern (fallback). Also assert post.canva.exported_png is either a `/uploads/...` string or None.",
+  "rca of the issue": "No bugs found. Both iteration-4 P2 deliverables are correctly implemented:\n1. export_design_png() helper at canva.py:410 — module-level, signature (design_id, token, attempts=15), POSTs to {CANVA_API}/exports with {design_id, format:{type:'png'}}, polls GET /exports/{job_id} up to `attempts` times with 2+i*0.3s backoff, downloads first URL from jj.urls list with httpx follow_redirects=True, writes to UPLOADS_DIR / f'canva_{design_id[:10]}_{new_id()[:6]}.png', returns f'/uploads/{fname}' on success or None on any failure path.\n2. Calendar clickable slots — CalendarPage.jsx renders <CanvaTemplatePicker slots={pickerSlots} .../> and only opens for slot.status === 'planned' (otherwise toast.message + early return); each pill has data-testid `cal-slot-${item.id}` and hover-button `cal-slot-canva-${item.id}`. CanvaTemplatePicker.jsx useEffect([open, slots]) pre-selects chosenSlot=slots[0].id when slots.length === 1, satisfying the per-slot launch UX.\n\nTwo initial test failures during authoring were SCRIPT bugs, not code bugs: (a) handler_body window was 4500 chars and truncated before the 'exported_png' field — expanded to 6000; (b) JSX regex used [^>]* but arrow functions () => contain '>' which broke the match — switched to .*? with re.DOTALL. Both fixed; full suite green."
+}

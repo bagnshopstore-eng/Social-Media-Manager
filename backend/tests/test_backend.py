@@ -325,3 +325,192 @@ class TestRegression:
         assert r2.status_code in (401, 403, 502)
         r3 = auth.get(f"{BASE_URL}/api/canva/connect")
         assert r3.status_code == 200
+
+
+# --- Iteration 4: export_design_png + clickable Calendar slot static checks ---
+class TestIteration4ExportPng:
+    """Static structural verification of the iteration-4 deliverables:
+    - export_design_png() helper in canva.py
+    - create_post_from_template uses it with fallback to thumbnail
+    - CalendarPage clickable planned slots + picker integration
+    - CanvaTemplatePicker 1-slot pre-selection
+    """
+
+    def test_export_design_png_helper_exists(self):
+        src = open("/app/backend/canva.py").read()
+        assert "async def export_design_png(" in src, (
+            "module-level helper export_design_png must exist"
+        )
+        # Module-level (not nested inside build_router)
+        helper_idx = src.find("async def export_design_png(")
+        build_router_idx = src.find("def build_router(")
+        # Helper must be defined OUTSIDE build_router (either before or after, at col 0)
+        # Find indent of the helper line
+        line_start = src.rfind("\n", 0, helper_idx) + 1
+        helper_indent = helper_idx - line_start
+        assert helper_indent == 0, (
+            f"export_design_png must be at module level (indent 0), got {helper_indent}"
+        )
+        # Confirm signature with attempts default
+        assert re.search(
+            r"async def export_design_png\(\s*design_id[^)]*token[^)]*attempts[^)]*\)",
+            src,
+        ), "signature should be (design_id, token, attempts=...)"
+
+    def test_export_design_png_posts_to_exports_endpoint(self):
+        src = open("/app/backend/canva.py").read()
+        # Isolate the helper body
+        helper_idx = src.find("async def export_design_png(")
+        helper_body = src[helper_idx:helper_idx + 3000]
+        # Must POST to /exports with PNG format
+        assert "/exports" in helper_body
+        assert re.search(r"format.*png", helper_body, re.IGNORECASE), (
+            "must specify format type png in export payload"
+        )
+        assert '"design_id"' in helper_body or "'design_id'" in helper_body
+
+    def test_export_design_png_polls_and_downloads(self):
+        src = open("/app/backend/canva.py").read()
+        helper_idx = src.find("async def export_design_png(")
+        helper_body = src[helper_idx:helper_idx + 3000]
+        # Polls GET /exports/{job_id}
+        assert re.search(r"/exports/.+job_id", helper_body) or re.search(
+            r'/exports/\{job_id\}', helper_body
+        ) or 'f"{CANVA_API}/exports/' in helper_body, (
+            "must poll GET /exports/{job_id}"
+        )
+        # Downloads to /uploads/ with canva_ prefix
+        assert "UPLOADS_DIR" in helper_body or "/uploads/" in helper_body
+        assert 'canva_' in helper_body, "saved filename should use canva_ prefix"
+        # Returns relative /uploads/... URL string
+        assert re.search(r'return\s+f["\']/uploads/', helper_body), (
+            "must return relative /uploads/<fname> URL on success"
+        )
+        # Returns None on failure paths
+        assert helper_body.count("return None") >= 2, (
+            "should return None on multiple failure paths"
+        )
+
+    def test_create_post_uses_export_with_thumbnail_fallback(self):
+        src = open("/app/backend/canva.py").read()
+        handler_idx = src.find("async def create_post_from_template")
+        assert handler_idx > 0
+        handler_body = src[handler_idx:handler_idx + 6000]
+        # Captures design_id from autofill result
+        assert re.search(r"design_id\s*=\s*design\.get\(", handler_body), (
+            "must capture design_id from final.result.design.id"
+        )
+        # Calls export_design_png and assigns to png_local_url
+        assert re.search(
+            r"png_local_url\s*=\s*await\s+export_design_png\(", handler_body
+        ), "must call await export_design_png(...) -> png_local_url"
+        # Falls back: image_url = png_local_url or thumb_url
+        assert re.search(
+            r"image_url\s*=\s*png_local_url\s+or\s+thumb_url", handler_body
+        ), "image_url must fall back to thumb_url when png_local_url is None"
+        # Canva metadata persisted with all four fields
+        for key in ("design_id", "design_url", "thumbnail_url", "exported_png"):
+            assert f'"{key}"' in handler_body, (
+                f"post.canva metadata must include '{key}'"
+            )
+
+    def test_calendar_page_clickable_slots_and_picker(self):
+        src = open("/app/frontend/src/pages/CalendarPage.jsx").read()
+        # Imports CanvaTemplatePicker
+        assert "import CanvaTemplatePicker" in src
+        # Picker state
+        assert "pickerSlots" in src and "setPickerSlots" in src
+        assert "pickerOpen" in src and "setPickerOpen" in src
+        # openCanvaForSlot only opens for planned status
+        assert "openCanvaForSlot" in src
+        assert re.search(
+            r"openCanvaForSlot\s*=\s*\(slot\)\s*=>", src
+        ), "openCanvaForSlot must be a function of slot"
+        m = re.search(
+            r"openCanvaForSlot\s*=\s*\(slot\)\s*=>\s*\{[^}]*?status\s*!==\s*[\"']planned[\"']",
+            src, re.DOTALL,
+        )
+        assert m, "openCanvaForSlot must guard on status === 'planned' (early-return otherwise)"
+        # Renders <CanvaTemplatePicker slots={pickerSlots} ... />
+        # (arrow functions in JSX contain `>` so [^>] would break — use DOTALL .*?)
+        assert re.search(
+            r"<CanvaTemplatePicker\b.*?slots=\{pickerSlots\}", src, re.DOTALL
+        ), "must render <CanvaTemplatePicker slots={pickerSlots} ... />"
+        # data-testid pattern for slot pill and inner button
+        assert "`cal-slot-${item.id}`" in src, (
+            "each planned pill needs data-testid `cal-slot-${item.id}`"
+        )
+        assert "`cal-slot-canva-${item.id}`" in src, (
+            "hover-button needs data-testid `cal-slot-canva-${item.id}`"
+        )
+
+    def test_canva_picker_preselects_single_slot(self):
+        src = open("/app/frontend/src/components/CanvaTemplatePicker.jsx").read()
+        # Must run a useEffect that depends on [open, slots]
+        assert re.search(r"\[\s*open\s*,\s*slots\s*\]", src), (
+            "useEffect must depend on [open, slots]"
+        )
+        # When slots.length === 1, setChosenSlot to that slot's id
+        assert re.search(
+            r"slots\.length\s*===\s*1[^}]*setChosenSlot\(\s*slots\[0\]\.id\s*\)",
+            src, re.DOTALL,
+        ), "must pre-select chosenSlot to slots[0].id when slots.length === 1"
+
+
+# --- Iteration 4: regression -- /api/canva/create-post negative paths still OK ---
+class TestIteration4CreatePostRegression:
+    def test_create_post_invalid_slot_still_404(self, auth):
+        auth.post(f"{BASE_URL}/api/canva/disconnect")
+        r = auth.post(f"{BASE_URL}/api/canva/create-post", json={
+            "slot_id": "iter4-bogus-slot-TEST",
+            "template_id": "tpl_iter4_TEST",
+            "fields": {"title": "iter4"},
+        })
+        assert r.status_code == 404
+        detail = (r.json().get("detail") or "").lower()
+        assert "calendar slot not found" in detail
+
+    def test_create_post_valid_slot_no_canva_still_401(self, auth):
+        auth.post(f"{BASE_URL}/api/canva/disconnect")
+        cal = auth.get(f"{BASE_URL}/api/calendar")
+        assert cal.status_code == 200
+        slots = cal.json()
+        assert len(slots) > 0
+        r = auth.post(f"{BASE_URL}/api/canva/create-post", json={
+            "slot_id": slots[0]["id"],
+            "template_id": "tpl_iter4_TEST",
+            "fields": {"title": "iter4"},
+        })
+        assert r.status_code == 401
+        detail = (r.json().get("detail") or "").lower()
+        assert "canva not connected" in detail
+
+    def test_canva_status_shape(self, auth):
+        r = auth.get(f"{BASE_URL}/api/canva/status")
+        assert r.status_code == 200
+        body = r.json()
+        assert "connected" in body and "configured" in body
+        assert isinstance(body["connected"], bool)
+        assert isinstance(body["configured"], bool)
+
+    def test_canva_connect_returns_authorize_url(self, auth):
+        r = auth.get(f"{BASE_URL}/api/canva/connect")
+        assert r.status_code == 200
+        body = r.json()
+        assert "authorize_url" in body and body["authorize_url"].startswith("https://")
+        assert "state" in body and len(body["state"]) > 10
+
+    def test_canva_templates_401_when_disconnected(self, auth):
+        auth.post(f"{BASE_URL}/api/canva/disconnect")
+        r = auth.get(f"{BASE_URL}/api/canva/templates")
+        assert r.status_code == 401
+        detail = (r.json().get("detail") or "").lower()
+        assert "canva not connected" in detail
+
+    def test_integrations_health_still_complete(self, auth):
+        r = auth.get(f"{BASE_URL}/api/integrations/health")
+        assert r.status_code == 200
+        body = r.json()
+        for key in ("postproxy", "mailersend", "canva", "slack_alerts"):
+            assert key in body, f"missing integrations.health key: {key}"
+        assert "_meta" in body and "alerts" in body["_meta"]

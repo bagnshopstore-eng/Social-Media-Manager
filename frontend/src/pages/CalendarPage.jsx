@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import CanvaTemplatePicker from "@/components/CanvaTemplatePicker";
+import { Palette } from "lucide-react";
+import { toast } from "sonner";
 
 const STATUS_COLORS = {
   planned: "bg-zinc-200 text-zinc-700",
@@ -19,13 +22,15 @@ export default function CalendarPage() {
   const [month, setMonth] = useState(() => {
     const d = new Date(); d.setDate(1); return d;
   });
+  const [pickerSlots, setPickerSlots] = useState([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      const [c, p] = await Promise.all([api.get("/calendar"), api.get("/posts")]);
-      setSlots(c.data); setPosts(p.data);
-    })();
-  }, []);
+  const load = async () => {
+    const [c, p] = await Promise.all([api.get("/calendar"), api.get("/posts")]);
+    setSlots(c.data); setPosts(p.data);
+  };
+
+  useEffect(() => { load(); }, []);
 
   // Map date -> [{type, item}]
   const byDate = {};
@@ -50,12 +55,22 @@ export default function CalendarPage() {
 
   const fmtKey = (d) => d.toISOString().slice(0, 10);
 
+  const openCanvaForSlot = (slot) => {
+    if (slot.status !== "planned") {
+      toast.message("Canva generation is only available for planned slots (not yet generated).");
+      return;
+    }
+    setPickerSlots([slot]);
+    setPickerOpen(true);
+  };
+
   return (
     <div className="space-y-8" data-testid="calendar-page">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 font-semibold mb-2">Plan</div>
           <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">Calendar</h1>
+          <p className="text-sm text-zinc-500 mt-1">Click any planned slot to generate it with a Canva brand template.</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setMonth(new Date(year, mo - 1, 1))} className="px-3 py-1.5 border border-zinc-300 rounded-md text-sm hover:bg-zinc-100" data-testid="cal-prev">← Prev</button>
@@ -82,10 +97,26 @@ export default function CalendarPage() {
                     {(byDate[fmtKey(d)] || []).slice(0, 4).map((entry, idx) => {
                       const item = entry.item;
                       const status = entry.type === "post" ? item.status : item.status;
+                      const isPlannedSlot = entry.type === "slot" && item.status === "planned";
                       return (
-                        <div key={idx} className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_COLORS[status] || "bg-zinc-100"} truncate`} title={item.hook || item.topic}>
-                          <span className="font-semibold uppercase mr-1">{item.platform.slice(0,2)}</span>
-                          {(item.hook || item.topic || "").slice(0, 22)}
+                        <div key={idx}
+                             className={`group text-[10px] px-1.5 py-0.5 rounded ${STATUS_COLORS[status] || "bg-zinc-100"} truncate flex items-center justify-between gap-1 ${isPlannedSlot ? "cursor-pointer hover:ring-1 hover:ring-zinc-900/30" : ""}`}
+                             title={item.hook || item.topic}
+                             onClick={isPlannedSlot ? () => openCanvaForSlot(item) : undefined}
+                             data-testid={isPlannedSlot ? `cal-slot-${item.id}` : undefined}>
+                          <span className="truncate">
+                            <span className="font-semibold uppercase mr-1">{item.platform.slice(0,2)}</span>
+                            {(item.hook || item.topic || "").slice(0, 18)}
+                          </span>
+                          {isPlannedSlot && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); openCanvaForSlot(item); }}
+                              className="opacity-0 group-hover:opacity-100 transition shrink-0 p-0.5 rounded hover:bg-white/60"
+                              title="Generate with Canva"
+                              data-testid={`cal-slot-canva-${item.id}`}>
+                              <Palette size={10} />
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -102,9 +133,17 @@ export default function CalendarPage() {
 
       <div className="flex flex-wrap gap-3 text-xs">
         {Object.entries(STATUS_COLORS).map(([k, c]) => (
-          <span key={k} className={`px-2 py-1 rounded ${c}`}>{k.replace("_"," ")}</span>
+          <span key={k} className={`px-2 py-1 rounded ${c}`}>{k.replace(/_/g," ")}</span>
         ))}
       </div>
+
+      <CanvaTemplatePicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        slots={pickerSlots}
+        onDesignReady={() => {}}
+        onPostCreated={() => { load(); toast.success("Post created. Review in Approvals."); }}
+      />
     </div>
   );
 }
