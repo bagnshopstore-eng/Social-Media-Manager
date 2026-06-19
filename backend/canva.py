@@ -264,9 +264,6 @@ def build_router(db, require_admin) -> APIRouter:
             raise HTTPException(r.status_code, r.text[:300])
         return r.json()
 
-    class _UnusedReqAlias:
-        pass
-
     @router.post("/create-post")
     async def create_post_from_template(
         body: CreatePostFromTemplateReq,
