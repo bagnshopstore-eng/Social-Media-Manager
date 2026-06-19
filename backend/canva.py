@@ -315,6 +315,8 @@ def build_router(db, require_admin) -> APIRouter:
 
         # Try to export as high-res PNG → falls back to thumbnail URL if export fails
         png_local_url = await export_design_png(design_id, token) if design_id else None
+        if design_id and not png_local_url:
+            logger.info("Canva export PNG failed for design %s — falling back to thumbnail", design_id)
         image_url = png_local_url or thumb_url
         if not image_url:
             raise HTTPException(504, f"Canva autofill did not produce an image. Job: {job_id}")

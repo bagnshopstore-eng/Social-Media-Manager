@@ -45,15 +45,19 @@ FastAPI · React · MongoDB · APScheduler · Emergent LLM key (Claude Sonnet 4.
 - ✅ Updated Shopify URL to `https://ajy6hu-sh.myshopify.com` (token still pending a fresh `shpat_…` custom app token)
 - ✅ Backend 100% test pass (33/33 pytest cases — 7 new tests this iteration)
 
+### Iteration 4 (2026-06-19, same day) — P2 follow-ups
+- ✅ **Canva `/v1/exports` integration** — new module-level helper `export_design_png(design_id, token)` POSTs to `/v1/exports`, polls, downloads the first signed URL with redirects, persists to `/app/backend/uploads/canva_<id>_<rand>.png` and returns the relative `/uploads/...` URL. `create_post_from_template` now prefers the exported PNG and falls back to the thumbnail URL on any failure (logged via `logger.info`). Post metadata stores all four: `design_id`, `design_url`, `thumbnail_url`, `exported_png`.
+- ✅ **Per-slot "Generate with Canva"** — CalendarPage planned-slot pills are now clickable + show a hover Palette button (`data-testid="cal-slot-canva-<id>"`). Clicking opens `CanvaTemplatePicker` pre-selected to that slot (1-slot launches skip the slot dropdown). Only `status==='planned'` slots launch the flow; other statuses show a toast and no-op.
+- ✅ Backend 100% test pass (45/45 pytest cases — 12 new tests this iteration)
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`. Admin: bagnshopstore@gmail.com / BagnShop@2026.
 
 ## Prioritized Backlog
-- **P0** User to click **Connect Canva** in Settings — Canva credentials are configured + redirect URI is whitelisted, just needs the one-time OAuth click. After that, brand-template + autofill + create-post all light up end-to-end.
+- **P0** User to click **Connect Canva** in Settings — Canva credentials are configured + redirect URI is whitelisted, just needs the one-time OAuth click. After that, brand-templates + autofill + create-post + PNG export all light up end-to-end (live test pending).
 - **P0** User to generate a fresh **Shopify Custom App Admin token** (`shpat_…`) — the two tokens supplied so far (atkn_, shpss_) are not Admin API tokens; both 401. Without this the product-aware creative agent falls back to non-product posts only.
 - **P1** Optional: `SLACK_WEBHOOK_URL` — deferred by user
-- **P2** Use Canva's `/v1/exports` (PNG) endpoint to download a high-res image instead of using the thumbnail URL as `image_urls[0]`
-- **P2** Add "Generate Canva" per-slot button on Calendar grid (vs only via global picker on Dashboard)
+- **P2** Per-slot "Use Canva" override flag on each Calendar slot, so the **weekly autonomous cycle** (Sat 6 am IST) picks Canva instead of Gemini for branded slots automatically
 - **P2** Telegram approval taps
 - **P2** Per-platform image dimensions (1:1, 4:5, 9:16)
 - **P3** Multi-brand, multi-admin
