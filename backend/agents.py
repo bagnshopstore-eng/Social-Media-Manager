@@ -105,7 +105,7 @@ async def postproxy_publish(post: dict) -> dict:
     if not POSTPROXY_KEY:
         return {"ok": False, "error": "POSTPROXY_API_KEY missing"}
     payload = {
-        "profile_group_id": POSTPROXY_PROFILE_GROUP_ID,
+        "profiles": [POSTPROXY_PROFILE_GROUP_ID] if POSTPROXY_PROFILE_GROUP_ID else [],
         "platforms": [post["platform"]],
         "caption": post["caption"],
         "media_urls": [assetify(u) for u in post.get("image_urls", [])],
@@ -113,7 +113,7 @@ async def postproxy_publish(post: dict) -> dict:
         "format": post.get("format", "single_image"),
     }
     if not POSTPROXY_PROFILE_GROUP_ID:
-        payload.pop("profile_group_id", None)
+        payload.pop("profiles", None)
     url = f"{POSTPROXY_BASE}/posts"
     # Try both auth schemes (Postproxy.dev uses X-API-Key; legacy uses Bearer)
     header_variants = [

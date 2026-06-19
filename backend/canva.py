@@ -32,6 +32,19 @@ SCOPES = (
 )
 
 
+class AutofillReq(BaseModel):
+    template_id: str
+    data: dict  # {field_name: {type:"text"|"image", text?:str, asset_id?:str}}
+    title: Optional[str] = None
+
+
+class CreatePostFromTemplateReq(BaseModel):
+    slot_id: str
+    template_id: str
+    fields: dict  # {field_name: text_value}
+    title: Optional[str] = None
+
+
 def _pkce() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(
@@ -214,11 +227,6 @@ def build_router(db, require_admin) -> APIRouter:
             raise HTTPException(r.status_code, r.text[:300])
         return r.json()
 
-    class AutofillReq(BaseModel):
-        template_id: str
-        data: dict  # {field_name: {type:"text"|"image", text?:str, asset_id?:str}}
-        title: Optional[str] = None
-
     @router.post("/autofill")
     async def autofill(body: AutofillReq, email: str = Depends(require_admin)):
         token = await _get_valid_token(db)
@@ -256,11 +264,117 @@ def build_router(db, require_admin) -> APIRouter:
             raise HTTPException(r.status_code, r.text[:300])
         return r.json()
 
+    class _UnusedReqAlias:
+        pass
+
+    @router.post("/create-post")
+    async def create_post_from_template(
+        body: CreatePostFromTemplateReq,
+        email: str = Depends(require_admin),
+    ):
+        """Run Canva autofill + caption generation, then create a Post for the calendar slot.
+        The Canva design's thumbnail URL is used as the post's image_url."""
+        from models import Post, BrandProfile, CalendarSlot, to_mongo, from_mongo
+        from agents import claude_text, guardrail_check
+
+        slot_doc = from_mongo(await db.content_calendar.find_one({"id": body.slot_id}))
+        if not slot_doc:
+            raise HTTPException(404, "Calendar slot not found")
+        slot = CalendarSlot(**slot_doc)
+        brand_doc = from_mongo(await db.brand_profile.find_one())
+        brand = BrandProfile(**brand_doc) if brand_doc else BrandProfile()
+
+        token = await _get_valid_token(db)
+        if not token:
+            raise HTTPException(401, "Canva not connected")
+
+        data = {k: {"type": "text", "text": str(v)} for k, v in body.fields.items() if v}
+        if not data:
+            data = {"title": {"type": "text", "text": slot.hook or slot.topic or "BagnShop"}}
+        payload = {
+            "brand_template_id": body.template_id,
+            "data": data,
+            "title": body.title or f"BagnShop AI — {slot.platform} {slot.date}",
+        }
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.post(
+                f"{CANVA_API}/autofills", json=payload,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+        if r.status_code not in (200, 201, 202):
+            raise HTTPException(r.status_code, f"Canva autofill failed: {r.text[:300]}")
+        job = (r.json().get("job") or r.json())
+        job_id = job.get("id")
+        final = await _poll_autofill_job(db, job_id, token, attempts=15)
+        design = (final.get("result") or {}).get("design") or {}
+        design_url = design.get("url")
+        thumb_url = (design.get("thumbnail") or {}).get("url") or design_url
+        if not thumb_url:
+            raise HTTPException(504, f"Canva autofill did not complete in time. Job: {job_id}")
+
+        system = (
+            f"You write social captions for BagnShop. Voice: {', '.join(brand.voice_rules)}. "
+            f"Banned words: {', '.join(brand.banned_claims)}. Never use them. "
+            "Open with the assigned hook. Match platform length norms. End with CTA. "
+            "Append the hashtags as a single line at the very end."
+        )
+        user_prompt = (
+            f"Write a {slot.platform} caption for BagnShop.\n\n"
+            f"Pillar: {slot.pillar}\nFormat: {slot.format}\n"
+            f"Hook: {slot.hook}\nAngle: {slot.caption_angle}\n"
+            f"CTA: {slot.cta}\nTopic: {slot.topic}\n"
+            f"Hashtags to append: {' '.join(slot.hashtags)}\n\n"
+            "Return the caption only — no JSON, no markdown."
+        )
+        try:
+            caption = await claude_text(system, user_prompt)
+        except Exception as e:
+            logger.warning("Caption gen failed: %s", e)
+            caption = f"{slot.hook}\n\n{slot.caption_angle}\n\n{slot.cta}\n\n{' '.join(slot.hashtags)}"
+
+        post = Post(
+            calendar_slot_id=slot.id,
+            platform=slot.platform,
+            format=slot.format,
+            caption=caption,
+            image_urls=[thumb_url],
+            hook=slot.hook,
+            pillar=slot.pillar,
+            cta=slot.cta,
+            hashtags=slot.hashtags,
+            scheduled_datetime=slot.scheduled_datetime,
+            status="pending_approval",
+            is_product_post=False,
+        )
+        issues = await guardrail_check(db, post, brand)
+        if issues:
+            post.status = "needs_edit"
+            post.guardrail_issues = issues
+
+        post_doc = to_mongo(post)
+        post_doc["source"] = "canva"
+        post_doc["canva"] = {
+            "template_id": body.template_id,
+            "job_id": job_id,
+            "design_url": design_url,
+            "thumbnail_url": thumb_url,
+        }
+        await db.posts.insert_one(post_doc)
+        await db.content_calendar.update_one(
+            {"id": slot.id}, {"$set": {"status": "creative_generated"}}
+        )
+        return {
+            "post_id": post.id,
+            "status": post.status,
+            "issues": post.guardrail_issues,
+            "image_url": thumb_url,
+            "design_url": design_url,
+        }
+
     return router
 
 
 async def _poll_autofill_job(db, job_id: str, token: str, attempts: int = 10) -> dict:
-    """Poll Canva autofill job up to ~30s; return final state dict."""
     if not job_id:
         return {"status": "unknown"}
     for i in range(attempts):

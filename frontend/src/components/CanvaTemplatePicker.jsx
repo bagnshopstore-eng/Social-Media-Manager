@@ -4,11 +4,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { RefreshCw, ExternalLink, Image as ImageIcon } from "lucide-react";
+import { RefreshCw, ExternalLink, Image as ImageIcon, FileCheck } from "lucide-react";
 
-export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
+export default function CanvaTemplatePicker({ open, onClose, onDesignReady, slots = [], onPostCreated }) {
   const [status, setStatus] = useState(null);
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -17,6 +18,8 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
   const [fieldName, setFieldName] = useState("title");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
+  const [chosenSlot, setChosenSlot] = useState("");
+  const [creatingPost, setCreatingPost] = useState(false);
 
   const loadStatus = async () => {
     try {
@@ -45,7 +48,7 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
 
   useEffect(() => {
     if (!open) {
-      setSelected(null); setTextValue(""); setResult(null);
+      setSelected(null); setTextValue(""); setResult(null); setChosenSlot("");
       return;
     }
     (async () => {
@@ -97,6 +100,25 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
     } finally { setRunning(false); }
   };
 
+  const createPost = async () => {
+    if (!selected || !chosenSlot) return toast.error("Pick a template and a calendar slot");
+    setCreatingPost(true);
+    try {
+      const r = await api.post("/canva/create-post", {
+        slot_id: chosenSlot,
+        template_id: selected.id,
+        fields: { [fieldName || "title"]: textValue || selected.title },
+        title: `BagnShop AI — ${selected.title}`,
+      });
+      toast.success(`Post created (${r.data.status}). Check Approvals.`);
+      onPostCreated?.(r.data);
+      onClose();
+    } catch (e) {
+      const msg = e?.response?.data?.detail || "Failed to create post";
+      toast.error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    } finally { setCreatingPost(false); }
+  };
+
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-3xl" data-testid="canva-picker">
@@ -137,7 +159,7 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
               </div>
             )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-72 overflow-y-auto" data-testid="canva-templates-grid">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-64 overflow-y-auto" data-testid="canva-templates-grid">
               {templates.map((t) => (
                 <button
                   key={t.id}
@@ -148,9 +170,9 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
                   }`}
                 >
                   {t.thumbnail_url ? (
-                    <img src={t.thumbnail_url} alt={t.title} className="w-full h-28 object-cover rounded-md mb-2" />
+                    <img src={t.thumbnail_url} alt={t.title} className="w-full h-24 object-cover rounded-md mb-2" />
                   ) : (
-                    <div className="w-full h-28 bg-zinc-100 rounded-md mb-2 flex items-center justify-center text-zinc-400">
+                    <div className="w-full h-24 bg-zinc-100 rounded-md mb-2 flex items-center justify-center text-zinc-400">
                       <ImageIcon size={20} />
                     </div>
                   )}
@@ -181,9 +203,30 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
                               className="mt-1.5" data-testid="canva-field-value" />
                   </div>
                 </div>
+
+                {slots.length > 0 && (
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-md p-3 space-y-2">
+                    <Label className="text-xs uppercase tracking-[0.16em] text-zinc-500">Attach to calendar slot (creates a Post)</Label>
+                    <Select value={chosenSlot} onValueChange={setChosenSlot}>
+                      <SelectTrigger data-testid="canva-slot-select">
+                        <SelectValue placeholder={`${slots.length} planned slots — choose one`} />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-72">
+                        {slots.map((s) => (
+                          <SelectItem key={s.id} value={s.id} data-testid={`canva-slot-${s.id}`}>
+                            <span className="font-mono text-[10px] mr-2">{s.date}</span>
+                            <span className="uppercase text-[10px] mr-2">{s.platform?.slice(0,2)}</span>
+                            <span className="text-xs">{(s.hook || s.topic || "").slice(0,50)}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
                 <p className="text-xs text-zinc-500">
                   Field name must match a data field defined in your Canva brand template.
-                  Use the field's <code>name</code> (not its label).
+                  Use the field&apos;s <code>name</code> (not its label).
                 </p>
               </div>
             )}
@@ -207,12 +250,23 @@ export default function CanvaTemplatePicker({ open, onClose, onDesignReady }) {
           </div>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="flex-wrap gap-2">
           <Button variant="outline" onClick={onClose} data-testid="canva-close">Close</Button>
           {status?.connected && (
-            <Button onClick={runAutofill} disabled={!selected || running} data-testid="canva-autofill-btn">
-              {running ? "Generating…" : "Autofill & generate"}
-            </Button>
+            <>
+              <Button variant="outline" onClick={runAutofill}
+                      disabled={!selected || running}
+                      data-testid="canva-autofill-btn">
+                {running ? "Generating…" : "Preview only"}
+              </Button>
+              <Button onClick={createPost}
+                      disabled={!selected || !chosenSlot || creatingPost}
+                      data-testid="canva-create-post-btn"
+                      className="bg-zinc-900 hover:bg-zinc-700">
+                <FileCheck size={14} className="mr-1.5" />
+                {creatingPost ? "Creating post…" : "Create post for slot"}
+              </Button>
+            </>
           )}
         </DialogFooter>
       </DialogContent>

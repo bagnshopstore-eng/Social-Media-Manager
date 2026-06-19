@@ -24,6 +24,15 @@ export default function Dashboard() {
   const [publishing, setPublishing] = useState(false);
   const [filter, setFilter] = useState("pending_approval");
   const [canvaOpen, setCanvaOpen] = useState(false);
+  const [plannedSlots, setPlannedSlots] = useState([]);
+
+  const loadSlots = useCallback(async () => {
+    try {
+      const r = await api.get("/calendar");
+      const planned = (r.data || []).filter((s) => s.status === "planned");
+      setPlannedSlots(planned);
+    } catch (e) { /* non-fatal */ }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -34,6 +43,7 @@ export default function Dashboard() {
   }, [filter]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadSlots(); }, [loadSlots]);
 
   const approve = async (post) => {
     await api.post(`/posts/${post.id}/status`, { status: "approved" });
@@ -207,9 +217,11 @@ export default function Dashboard() {
       <CanvaTemplatePicker
         open={canvaOpen}
         onClose={() => setCanvaOpen(false)}
+        slots={plannedSlots}
         onDesignReady={(design) => {
           toast.success(`Design "${design.template_title}" ready in Canva.`);
         }}
+        onPostCreated={() => { loadSlots(); setFilter("pending_approval"); load(); }}
       />
     </div>
   );
