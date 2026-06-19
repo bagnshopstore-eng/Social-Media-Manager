@@ -448,7 +448,11 @@ async def _collect_integrations_health(db_obj) -> dict:
                 r = await cli.get("https://api.mailersend.com/v1/domains",
                                   headers={"Authorization": f"Bearer {mk}"})
             if r.status_code == 200:
-                detail = "Authenticated" + ("" if mfrom else " (MAILERSEND_FROM_EMAIL not set)")
+                detail = "Authenticated (full access)" + ("" if mfrom else " — set MAILERSEND_FROM_EMAIL to enable sending")
+                ok = bool(mfrom)
+            elif r.status_code in (401, 403):
+                # send-only tokens 403 on /domains but still work for /email
+                detail = ("Send-only token" + ("" if mfrom else " — set MAILERSEND_FROM_EMAIL to enable sending"))
                 ok = bool(mfrom)
             else:
                 detail = r.text[:80]
