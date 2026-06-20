@@ -382,9 +382,10 @@ class TestIteration4ExportPng:
         # Downloads to /uploads/ with canva_ prefix
         assert "UPLOADS_DIR" in helper_body or "/uploads/" in helper_body
         assert 'canva_' in helper_body, "saved filename should use canva_ prefix"
-        # Returns relative /uploads/... URL string
-        assert re.search(r'return\s+f["\']/uploads/', helper_body), (
-            "must return relative /uploads/<fname> URL on success"
+        # Returns relative /uploads/... or /api/uploads/... URL string (iter5: ingress
+        # only routes /api/*, so canva helper now returns /api/uploads/<fname>)
+        assert re.search(r'return\s+f["\']/(api/)?uploads/', helper_body), (
+            "must return relative /uploads/<fname> or /api/uploads/<fname> URL on success"
         )
         # Returns None on failure paths
         assert helper_body.count("return None") >= 2, (
