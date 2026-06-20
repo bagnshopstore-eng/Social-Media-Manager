@@ -46,18 +46,26 @@ FastAPI · React · MongoDB · APScheduler · Emergent LLM key (Claude Sonnet 4.
 - ✅ Backend 100% test pass (33/33 pytest cases — 7 new tests this iteration)
 
 ### Iteration 4 (2026-06-19, same day) — P2 follow-ups
-- ✅ **Canva `/v1/exports` integration** — new module-level helper `export_design_png(design_id, token)` POSTs to `/v1/exports`, polls, downloads the first signed URL with redirects, persists to `/app/backend/uploads/canva_<id>_<rand>.png` and returns the relative `/uploads/...` URL. `create_post_from_template` now prefers the exported PNG and falls back to the thumbnail URL on any failure (logged via `logger.info`). Post metadata stores all four: `design_id`, `design_url`, `thumbnail_url`, `exported_png`.
-- ✅ **Per-slot "Generate with Canva"** — CalendarPage planned-slot pills are now clickable + show a hover Palette button (`data-testid="cal-slot-canva-<id>"`). Clicking opens `CanvaTemplatePicker` pre-selected to that slot (1-slot launches skip the slot dropdown). Only `status==='planned'` slots launch the flow; other statuses show a toast and no-op.
-- ✅ Backend 100% test pass (45/45 pytest cases — 12 new tests this iteration)
+- ✅ **Canva `/v1/exports` integration** — new module-level helper `export_design_png(design_id, token)` POSTs to `/v1/exports`, polls, downloads the first signed URL, persists to `/app/backend/uploads/canva_<id>_<rand>.png` and returns `/api/uploads/...`. `create_post_from_template` prefers the exported PNG and falls back to the Canva thumbnail URL on failure. Post metadata stores design_id, design_url, thumbnail_url, exported_png.
+- ✅ **Per-slot "Generate with Canva"** — CalendarPage planned-slot pills are clickable + show a hover Palette button. Picker pre-selects the slot when 1 slot is passed.
+- ✅ Backend 100% test pass (45/45 pytest cases — 12 new tests).
+
+### Iteration 5 (2026-06-19, same day) — Critical fixes
+- ✅ **Static asset routing fixed** — K8s ingress only routes `/api/*` to backend; the original `/uploads/...` mount was unreachable externally and was returning the React HTML instead of PNGs. Now dual-mounted at both `/uploads` (local dev) and `/api/uploads` (ingress-reachable). `generate_image()`, `export_design_png()`, frontend `assetUrl()`, and backend `assetify()` all rewrite to `/api/uploads/`. All 7 pending posts now render real images.
+- ✅ **Shopify GREEN** — fresh `shpat_3e769e47...` Custom App Admin token authenticates against `bagnshop.com` store; live fetch returns 47 active products with `cdn.shopify.com` images. Backfilled the 2 stale stock-photo product posts (Pexels/Unsplash) with real BagnShop product images (Nose Trimmer, Motion Sensor Lamp).
+- ✅ **Canva callback hardened** — signature changed from `Query(...)` (which 422'd on missing params) to `Optional[str] = Query(default=None)` plus `request: Request` for raw URL/query logging. Every code path (missing params, Canva error redirect, invalid state, token exchange failure, exception, success) writes a row to `db.canva_callback_log` with a distinct `outcome` field and a real `received_at_dt` datetime. URL-encodes error params via `urllib.parse.quote`. The 422 root cause is gone.
+- ✅ **New diagnostic endpoint** `GET /api/canva/debug` (admin-only) returns: configured client_id, redirect_uri, public_backend_url, scopes_requested, token_saved boolean, recent_oauth_states (last 5, code_verifier excluded), recent_callbacks (last 10 with full URL + query params + outcome).
+- ✅ **TTL indexes** added: `canva_oauth_states` auto-prunes after 30 min, `canva_callback_log` after 30 days. Prevents indefinite accumulation.
+- ✅ Backend 100% test pass (67/67 pytest cases — 22 new this iteration).
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`. Admin: bagnshopstore@gmail.com / BagnShop@2026.
 
 ## Prioritized Backlog
-- **P0** User to click **Connect Canva** in Settings — Canva credentials are configured + redirect URI is whitelisted, just needs the one-time OAuth click. After that, brand-templates + autofill + create-post + PNG export all light up end-to-end (live test pending).
-- **P0** User to generate a fresh **Shopify Custom App Admin token** (`shpat_…`) — the two tokens supplied so far (atkn_, shpss_) are not Admin API tokens; both 401. Without this the product-aware creative agent falls back to non-product posts only.
+- **P0** User to click **Connect Canva** in Settings — credentials configured + redirect URI whitelisted + callback fully instrumented with diagnostic logging (`/api/canva/debug` + `db.canva_callback_log`). After OAuth click-through, brand-templates + autofill + PNG export + create-post all light up.
 - **P1** Optional: `SLACK_WEBHOOK_URL` — deferred by user
 - **P2** Per-slot "Use Canva" override flag on each Calendar slot, so the **weekly autonomous cycle** (Sat 6 am IST) picks Canva instead of Gemini for branded slots automatically
 - **P2** Telegram approval taps
 - **P2** Per-platform image dimensions (1:1, 4:5, 9:16)
 - **P3** Multi-brand, multi-admin
+- **P3** Shopify products pagination when catalog > 250 SKUs (current: 47; not blocking)

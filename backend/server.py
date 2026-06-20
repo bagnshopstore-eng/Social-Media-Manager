@@ -564,6 +564,13 @@ async def on_startup():
             await db.competitors.insert_one(to_mongo(comp))
         logger.info("Seeded %d competitors", len(COMPETITORS_SEED))
 
+    # TTL indexes: auto-prune stale OAuth state rows + old callback diagnostics
+    try:
+        await db.canva_oauth_states.create_index("created_at_dt", expireAfterSeconds=1800)  # 30 min
+        await db.canva_callback_log.create_index("received_at_dt", expireAfterSeconds=2592000)  # 30 days
+    except Exception as e:
+        logger.warning("TTL index create failed (non-fatal): %s", e)
+
     # Start scheduler
     if SCHED_ENABLED:
         app.state.scheduler = build_scheduler(

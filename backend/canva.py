@@ -13,6 +13,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from urllib.parse import quote as urlquote
 
 from models import now_utc, new_id
 
@@ -134,10 +135,12 @@ def build_router(db, require_admin) -> APIRouter:
             raise HTTPException(400, "CANVA_CLIENT_ID missing")
         verifier, challenge = _pkce()
         state = secrets.token_urlsafe(24)
+        now_dt = now_utc()
         await db.canva_oauth_states.insert_one({
             "state": state, "code_verifier": verifier,
             "admin_email": email,
-            "created_at": now_utc().isoformat(),
+            "created_at": now_dt.isoformat(),
+            "created_at_dt": now_dt,  # for TTL index
         })
         redirect = CANVA_REDIRECT_URI or f"{PUBLIC_URL}/api/canva/callback"
         from urllib.parse import urlencode
@@ -170,9 +173,11 @@ def build_router(db, require_admin) -> APIRouter:
                        bool(code), bool(state), error)
 
         # Always persist what we received, success or failure — diagnosed via /api/canva/debug
+        now_dt = now_utc()
         attempt = {
             "id": new_id(),
-            "received_at": now_utc().isoformat(),
+            "received_at": now_dt.isoformat(),
+            "received_at_dt": now_dt,  # for TTL index
             "full_url": full_url,
             "query_params": all_qp,
             "has_code": bool(code),
@@ -187,7 +192,7 @@ def build_router(db, require_admin) -> APIRouter:
             await db.canva_callback_log.insert_one(attempt)
             logger.warning("Canva callback returned error: %s — %s", error, error_description)
             return RedirectResponse(
-                f"{PUBLIC_URL}/settings?canva=error&detail={error}"
+                f"{PUBLIC_URL}/settings?canva=error&detail={urlquote(error)}"
             )
         if not code or not state:
             attempt["outcome"] = "missing_code_or_state"
