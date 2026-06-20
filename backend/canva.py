@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import httpx
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -154,10 +154,53 @@ def build_router(db, require_admin) -> APIRouter:
         return {"authorize_url": url, "state": state}
 
     @router.get("/callback")
-    async def callback(code: str = Query(...), state: str = Query(...)):
+    async def callback(
+        request: Request,
+        code: Optional[str] = Query(default=None),
+        state: Optional[str] = Query(default=None),
+        error: Optional[str] = Query(default=None),
+        error_description: Optional[str] = Query(default=None),
+    ):
+        # Verbatim diagnostic log of what hit the callback
+        full_url = str(request.url)
+        all_qp = dict(request.query_params)
+        logger.warning("CANVA CALLBACK URL: %s", full_url)
+        logger.warning("CANVA CALLBACK QUERY PARAMS: %s", all_qp)
+        logger.warning("CANVA CALLBACK code_present=%s state_present=%s error=%s",
+                       bool(code), bool(state), error)
+
+        # Always persist what we received, success or failure — diagnosed via /api/canva/debug
+        attempt = {
+            "id": new_id(),
+            "received_at": now_utc().isoformat(),
+            "full_url": full_url,
+            "query_params": all_qp,
+            "has_code": bool(code),
+            "has_state": bool(state),
+            "code_prefix": (code[:8] + "...") if code else None,
+            "state": state,
+            "canva_error": error,
+            "canva_error_description": error_description,
+        }
+        if error:
+            attempt["outcome"] = "canva_redirect_with_error"
+            await db.canva_callback_log.insert_one(attempt)
+            logger.warning("Canva callback returned error: %s — %s", error, error_description)
+            return RedirectResponse(
+                f"{PUBLIC_URL}/settings?canva=error&detail={error}"
+            )
+        if not code or not state:
+            attempt["outcome"] = "missing_code_or_state"
+            await db.canva_callback_log.insert_one(attempt)
+            return RedirectResponse(f"{PUBLIC_URL}/settings?canva=error&detail=missing_params")
+
         st = await db.canva_oauth_states.find_one({"state": state}, {"_id": 0})
         if not st:
-            raise HTTPException(400, "Invalid state")
+            attempt["outcome"] = "invalid_state_not_in_db"
+            await db.canva_callback_log.insert_one(attempt)
+            logger.warning("Canva callback: state %s not found in oauth_states", state)
+            return RedirectResponse(f"{PUBLIC_URL}/settings?canva=error&detail=invalid_state")
+
         redirect = CANVA_REDIRECT_URI or f"{PUBLIC_URL}/api/canva/callback"
         try:
             async with httpx.AsyncClient(timeout=15) as cli:
@@ -174,16 +217,48 @@ def build_router(db, require_admin) -> APIRouter:
                         "redirect_uri": redirect,
                     },
                 )
+            attempt["token_exchange_status"] = r.status_code
+            attempt["token_exchange_body"] = r.text[:500]
             if r.status_code != 200:
-                logger.warning("Canva token exchange failed: %s %s", r.status_code, r.text[:300])
-                fe = f"{PUBLIC_URL}/settings?canva=error&detail={r.status_code}"
-                return RedirectResponse(fe)
+                attempt["outcome"] = "token_exchange_failed"
+                await db.canva_callback_log.insert_one(attempt)
+                logger.warning("Canva token exchange failed %s: %s", r.status_code, r.text[:300])
+                return RedirectResponse(
+                    f"{PUBLIC_URL}/settings?canva=error&detail=token_{r.status_code}"
+                )
             await _save_tokens(db, r.json())
             await db.canva_oauth_states.delete_one({"state": state})
+            attempt["outcome"] = "success"
+            await db.canva_callback_log.insert_one(attempt)
         except Exception as e:
-            logger.exception("Canva callback failed: %s", e)
-            return RedirectResponse(f"{PUBLIC_URL}/settings?canva=error")
+            attempt["outcome"] = "exception"
+            attempt["exception"] = str(e)
+            await db.canva_callback_log.insert_one(attempt)
+            logger.exception("Canva callback exception: %s", e)
+            return RedirectResponse(f"{PUBLIC_URL}/settings?canva=error&detail=exception")
         return RedirectResponse(f"{PUBLIC_URL}/settings?canva=success")
+
+    @router.get("/debug")
+    async def debug(email: str = Depends(require_admin)):
+        """Diagnostic snapshot for OAuth troubleshooting."""
+        states = await db.canva_oauth_states.find({}, {"_id": 0, "code_verifier": 0}).sort(
+            "created_at", -1
+        ).limit(5).to_list(5)
+        callbacks = await db.canva_callback_log.find({}, {"_id": 0}).sort(
+            "received_at", -1
+        ).limit(10).to_list(10)
+        token = await db.canva_tokens.find_one({"id": "canva_admin"},
+                                                {"_id": 0, "access_token": 0, "refresh_token": 0})
+        return {
+            "client_id": CANVA_CLIENT_ID,
+            "configured_redirect_uri": CANVA_REDIRECT_URI or f"{PUBLIC_URL}/api/canva/callback",
+            "public_backend_url": PUBLIC_URL,
+            "scopes_requested": SCOPES,
+            "token_saved": bool(token),
+            "token_meta": token,
+            "recent_oauth_states": states,
+            "recent_callbacks": callbacks,
+        }
 
     @router.post("/disconnect")
     async def disconnect(email: str = Depends(require_admin)):
