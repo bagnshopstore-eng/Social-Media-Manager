@@ -267,6 +267,99 @@ async def regenerate_post(post_id: str, email: str = Depends(require_admin)):
     return result or {"status": "error"}
 
 
+class BulkRegenImagesReq(BaseModel):
+    scope: str = "pending"  # "pending" | "all" | "selected"
+    post_ids: Optional[List[str]] = None
+    dry_run: bool = False  # if True, return matches without writing
+
+
+def _score_match(post_text: str, product_title: str) -> int:
+    """Cheap word-overlap score, lowercased, stop-words ignored."""
+    stop = {"the", "a", "an", "of", "for", "in", "on", "to", "and", "or", "is", "are",
+            "with", "your", "you", "we", "our", "this", "that", "it", "its", "by",
+            "from", "at", "as", "&", "-", "|", ""}
+    p = {w.strip(".,!?'\"():").lower() for w in post_text.split()}
+    t = {w.strip(".,!?'\"():").lower() for w in product_title.split()}
+    return len(p & t - stop)
+
+
+def _best_product(post: dict, products: list[dict]) -> Optional[dict]:
+    text = " ".join([
+        post.get("hook") or "", post.get("caption") or "",
+        post.get("pillar") or "", " ".join(post.get("hashtags") or []),
+    ])
+    scored = [(_score_match(text, p["title"]), p) for p in products if p.get("image")]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    if not scored:
+        return None
+    top_score, top = scored[0]
+    if top_score == 0:
+        # No overlap — pick a random in-stock product so user gets a real image rather than stale
+        import random
+        in_stock = [p for p in products if p.get("image") and p.get("in_stock", True)]
+        return random.choice(in_stock) if in_stock else top
+    return top
+
+
+@api.post("/posts/bulk-regenerate-images")
+async def bulk_regen_images(body: BulkRegenImagesReq, email: str = Depends(require_admin)):
+    """Replace image_urls[0] of selected posts with the best-matching real Shopify product
+    image (keyword-overlap match against title). Tags post as is_product_post=True
+    and stores product_handle/title/price for future reference."""
+    products = await fetch_shopify_products(limit=100)
+    products = [p for p in products if p.get("image")]
+    if not products:
+        raise HTTPException(503, "No Shopify products available")
+
+    q: dict = {}
+    if body.scope == "pending":
+        q["status"] = "pending_approval"
+    elif body.scope == "selected" and body.post_ids:
+        q["id"] = {"$in": body.post_ids}
+    # else: scope='all' — no filter
+    posts = await db.posts.find(q, {"_id": 0}).to_list(500)
+
+    matched, skipped = [], []
+    for post in posts:
+        match = _best_product(post, products)
+        if not match:
+            skipped.append({"id": post["id"], "reason": "no_match"})
+            continue
+        old_url = (post.get("image_urls") or ["(none)"])[0]
+        new_url = match["image"]
+        matched.append({
+            "id": post["id"],
+            "platform": post["platform"],
+            "hook": (post.get("hook") or "")[:60],
+            "old_url": old_url,
+            "new_url": new_url,
+            "product_title": match["title"],
+            "product_price": match.get("price"),
+        })
+        if body.dry_run:
+            continue
+        await db.posts.update_one(
+            {"id": post["id"]},
+            {"$set": {
+                "image_urls": [new_url] + (post.get("image_urls") or [])[1:],
+                "is_product_post": True,
+                "product_handle": match.get("handle"),
+                "product_title": match["title"],
+                "product_price": match.get("price"),
+                "updated_at": now_utc().isoformat(),
+            }},
+        )
+    return {
+        "scope": body.scope,
+        "candidates": len(posts),
+        "matched_count": len(matched),
+        "skipped_count": len(skipped),
+        "dry_run": body.dry_run,
+        "matched": matched,
+        "skipped": skipped,
+    }
+
+
 # ---------- Insights ----------
 @api.get("/insights")
 async def insights(email: str = Depends(require_admin)):

@@ -3,8 +3,9 @@ import { api } from "@/lib/api";
 import PostCard from "@/components/PostCard";
 import EditPostDialog from "@/components/EditPostDialog";
 import CanvaTemplatePicker from "@/components/CanvaTemplatePicker";
+import BulkProductMatchDialog from "@/components/BulkProductMatchDialog";
 import { toast } from "sonner";
-import { Sparkles, Send, RefreshCw, Inbox, Palette } from "lucide-react";
+import { Sparkles, Send, RefreshCw, Inbox, Palette, Package } from "lucide-react";
 
 const groupByDate = (posts) => {
   const groups = {};
@@ -24,6 +25,7 @@ export default function Dashboard() {
   const [publishing, setPublishing] = useState(false);
   const [filter, setFilter] = useState("pending_approval");
   const [canvaOpen, setCanvaOpen] = useState(false);
+  const [bulkMatchOpen, setBulkMatchOpen] = useState(false);
   const [plannedSlots, setPlannedSlots] = useState([]);
 
   const loadSlots = useCallback(async () => {
@@ -117,6 +119,14 @@ export default function Dashboard() {
             className="flex items-center gap-2 bg-zinc-900 text-white text-sm font-medium px-4 py-2 rounded-md hover:bg-zinc-700 active:scale-[0.99] transition disabled:opacity-50"
           >
             <Sparkles size={14} /> {generating ? "Generating..." : "Generate next week"}
+          </button>
+          <button
+            onClick={() => setBulkMatchOpen(true)}
+            data-testid="open-bulk-match"
+            className="flex items-center gap-2 border border-zinc-300 text-zinc-800 text-sm font-medium px-4 py-2 rounded-md hover:bg-zinc-100 active:scale-[0.99] transition"
+            title="Replace post images with best-matching Shopify product photos"
+          >
+            <Package size={14} /> Match products
           </button>
           <button
             onClick={() => setCanvaOpen(true)}
@@ -222,6 +232,12 @@ export default function Dashboard() {
           toast.success(`Design "${design.template_title}" ready in Canva.`);
         }}
         onPostCreated={() => { loadSlots(); setFilter("pending_approval"); load(); }}
+      />
+
+      <BulkProductMatchDialog
+        open={bulkMatchOpen}
+        onClose={() => setBulkMatchOpen(false)}
+        onApplied={() => load()}
       />
     </div>
   );
