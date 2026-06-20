@@ -58,6 +58,13 @@ FastAPI · React · MongoDB · APScheduler · Emergent LLM key (Claude Sonnet 4.
 - ✅ **TTL indexes** added: `canva_oauth_states` auto-prunes after 30 min, `canva_callback_log` after 30 days. Prevents indefinite accumulation.
 - ✅ Backend 100% test pass (67/67 pytest cases — 22 new this iteration).
 
+### Iteration 6 (2026-06-20) — Bulk product matching
+- ✅ **New endpoint** `POST /api/posts/bulk-regenerate-images` — accepts `{scope: 'pending'|'all'|'selected', post_ids?: [...], dry_run: bool}`, runs keyword-overlap + substring matching against the live 47-product Shopify catalog, and either previews (`dry_run`) or commits (writes `image_urls[0] = cdn.shopify.com/...`, `is_product_post=True`, `product_handle/title/price` on each updated post).
+- ✅ **Match quality** — substring scoring so 'gifting' overlaps with 'Gift Bundle', 'kitchen' overlaps with 'Kitchens'. When no overlap exists, falls back to random in-stock product.
+- ✅ **Safety guard** — `scope='selected'` with empty `post_ids` now returns 400 (was silently rewriting all posts).
+- ✅ **Frontend** — "Match products" button on the Approvals page launches `BulkProductMatchDialog` showing a preview grid (old image → new Shopify product photo, with title + ₹price), scope selector (pending vs all), and a single Apply commit.
+- ✅ Backend 100% test pass (86/86 pytest cases — 19 new this iteration).
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`. Admin: bagnshopstore@gmail.com / BagnShop@2026.
 

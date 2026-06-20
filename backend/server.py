@@ -273,14 +273,28 @@ class BulkRegenImagesReq(BaseModel):
     dry_run: bool = False  # if True, return matches without writing
 
 
-def _score_match(post_text: str, product_title: str) -> int:
-    """Cheap word-overlap score, lowercased, stop-words ignored."""
+def _tokenize(s: str) -> set[str]:
     stop = {"the", "a", "an", "of", "for", "in", "on", "to", "and", "or", "is", "are",
             "with", "your", "you", "we", "our", "this", "that", "it", "its", "by",
             "from", "at", "as", "&", "-", "|", ""}
-    p = {w.strip(".,!?'\"():").lower() for w in post_text.split()}
-    t = {w.strip(".,!?'\"():").lower() for w in product_title.split()}
-    return len(p & t - stop)
+    return {w.strip(".,!?'\"():").lower() for w in s.split()} - stop
+
+
+def _score_match(post_text: str, product_title: str) -> int:
+    """Word-overlap with simple substring matching so 'gifting' overlaps with 'gift'."""
+    p = _tokenize(post_text)
+    t = _tokenize(product_title)
+    score = 0
+    for pw in p:
+        if len(pw) < 3:
+            continue
+        for tw in t:
+            if len(tw) < 3:
+                continue
+            if pw == tw or pw in tw or tw in pw:
+                score += 1
+                break
+    return score
 
 
 def _best_product(post: dict, products: list[dict]) -> Optional[dict]:
@@ -314,7 +328,9 @@ async def bulk_regen_images(body: BulkRegenImagesReq, email: str = Depends(requi
     q: dict = {}
     if body.scope == "pending":
         q["status"] = "pending_approval"
-    elif body.scope == "selected" and body.post_ids:
+    elif body.scope == "selected":
+        if not body.post_ids:
+            raise HTTPException(400, "scope='selected' requires non-empty post_ids")
         q["id"] = {"$in": body.post_ids}
     # else: scope='all' — no filter
     posts = await db.posts.find(q, {"_id": 0}).to_list(500)
